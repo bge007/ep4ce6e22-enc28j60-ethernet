@@ -1,0 +1,44 @@
+# Quartus build artifacts
+db/
+incremental_db/
+output_files/
+simulation/
+greybox_tmp/
+hc_output/
+*.qws
+*.rpt
+*.summary
+*.smsg
+*.done
+*.jdi
+*.jditmp
+*.pin
+*.sld
+*.qdf
+*.bak
+*.orig
+*.qarlog
+
+# Generated bitstreams (rebuild from source)
+*.sof
+*.pof
+*.rbf
+*.jic
+*.svf
+
+# Questa / ModelSim simulation artifacts
+sim/
+work/
+transcript
+vsim.wlf
+vsim_stacktrace.vstf
+modelsim.ini
+*.vcd
+*.vstf
+
+# Editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*~

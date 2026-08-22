@@ -1,0 +1,166 @@
+# EP4CE6E22 + ENC28J60 — a hardware Ethernet stack in Verilog
+
+Two **EP4CE6E22C8** Cyclone IV E boards, each driving a Microchip **ENC28J60**
+10 Mbps Ethernet controller over SPI, joined by a single LAN cable — with the
+ARP / ICMP / UDP stack built as pure HDL rather than firmware on a soft CPU.
+
+The target is the practical ceiling of 10Base-T: **~9.57 Mbit/s** of UDP
+payload, which is what 1,472-byte datagrams work out to once framing overhead
+is accounted for. See [docs/plan.md](docs/plan.md) for that arithmetic and the
+design rationale.
+
+> ### Status: milestone 1 of 5, simulated and synthesised, **not yet run on hardware**
+>
+> Unlike [ep4ce6e22-fpga-quickstart](https://github.com/bge007/ep4ce6e22-fpga-quickstart),
+> where everything was verified on a real board before publishing, this repo is
+> work in progress. What exists is checked by simulation and compiles cleanly
+> with timing met — but no part of it has driven a physical ENC28J60 yet. The
+> pin assignments in particular are **unverified**; see
+> [Before you power anything on](#before-you-power-anything-on).
+
+---
+
+## What works today
+
+**M1 — prove the SPI path.** The design resets the ENC28J60, issues the soft
+reset opcode, selects register bank 3, reads `EREVID`, and displays it on the
+board's five LEDs. Rev B7 silicon reads `0x06`, so LEDs 1 and 2 lit is the
+pass condition. It re-reads ten times a second, so a loose wire shows up as
+flicker rather than a stuck value.
+
+That sounds trivial, and it is deliberately the smallest thing that proves
+something real: a correct `EREVID` means the SPI master, the clock divider,
+the opcode encoding, the bank switching, the wiring, and the module's power
+are all simultaneously working.
+
+| | |
+|---|---|
+| Simulation | Passes — self-checking testbench against a behavioral ENC28J60 model |
+| Quartus compile | 0 errors, 0 critical warnings |
+| Logic elements | 155 / 6,272 (2%) |
+| Registers | 88 |
+| Worst-case setup slack | +7.29 ns |
+| Worst-case hold slack | +0.40 ns |
+| Hardware | **Not yet tested** |
+
+The full stack is budgeted at ~2,500 LE, so there is plenty of room left.
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| [`rtl/spi_master.v`](rtl/spi_master.v) | Byte-streaming SPI master, mode 0, burst-capable |
+| [`rtl/eth_top.v`](rtl/eth_top.v) | M1 top level: reset sequencing, EREVID read, LED display |
+| [`tb/tb_m1.v`](tb/tb_m1.v) | Self-checking testbench + behavioral ENC28J60 SPI-slave model |
+| [`docs/plan.md`](docs/plan.md) | Design rationale, throughput budget, milestones, errata list |
+| [`docs/wiring.md`](docs/wiring.md) | Pin-by-pin wiring for both nodes and the crossover cable |
+| [`docs/bringup.md`](docs/bringup.md) | How to read the LEDs, what each failure mode looks like |
+| [`build.ps1`](build.ps1) | Simulate, compile, and program in one command |
+
+## Building
+
+Needs Quartus Prime Lite 25.1 (Questa FSE ships bundled with it, so there is
+no separate simulator to install).
+
+```powershell
+.\build.ps1          # simulate, then compile
+.\build.ps1 -Sim     # simulate only
+.\build.ps1 -Prog    # compile and program the board
+```
+
+Tool paths default to a stock `C:\altera_lite\25.1std` install. Override with
+`-QuartusBin` / `-QuestaBin` / `-LoaderExe`, or the `QUARTUS_BIN`,
+`QUESTA_BIN`, `OFL_EXE` environment variables.
+
+Programming goes through [openFPGALoader](https://github.com/trabucayre/openFPGALoader)
+rather than Quartus's own JTAG server. If your USB-Blaster is a clone — most
+bundled ones are — see the
+[troubleshooting write-up](https://github.com/bge007/ep4ce6e22-fpga-quickstart/blob/main/docs/usb-blaster-troubleshooting.md)
+in the companion repo.
+
+## Wiring
+
+Identical on both boards. Full detail, including the RJ45 crossover pinout, is
+in [docs/wiring.md](docs/wiring.md).
+
+| FPGA net | FPGA pin | Dir | Module header | ENC28J60 IC pin |
+|---|---|---|---|---|
+| `enc_sck`   | PIN_103 | → | `SCK`   | 8  |
+| `enc_mosi`  | PIN_104 | → | `SI`    | 7  |
+| `enc_miso`  | PIN_105 | ← | `SO`    | 6  |
+| `enc_cs_n`  | PIN_106 | → | `CS`    | 9  |
+| `enc_rst_n` | PIN_110 | → | `RESET` | 10 |
+| `enc_int`   | PIN_111 | ← | `INT`   | 4  |
+| 3.3 V | — | — | `VCC` | 28 |
+| GND | GND | — | `GND` | 2 |
+
+### Before you power anything on
+
+Three things that are genuinely likely to bite, in rough order of probability:
+
+1. **The FPGA pin assignments above are unverified.** They were chosen from
+   free user I/O that other projects on this board drive, not read off a
+   header diagram. Check them against your board's silkscreen first.
+2. **The ENC28J60 needs its own 3.3 V regulator.** It draws up to ~180 mA
+   while transmitting, which is more than an FPGA board's 3.3 V pin should be
+   asked to supply. Tie grounds together and decouple with 100 nF + 10 µF at
+   the module.
+3. **Match the module header by label, not position.** ENC28J60 breakouts ship
+   with several different 2×5 header layouts between vendors.
+
+### The cable must be a crossover
+
+The ENC28J60 has **no Auto-MDIX**, and in a two-board topology there is no
+switch to do the crossing for you. A straight-through patch cable wires
+transmitter to transmitter and the link LED never comes on.
+
+Use a crossover cable — T568A crimped on one end, T568B on the other, which
+swaps pins 1↔3 and 2↔6 — or put any 10/100 switch between the boards and use
+two ordinary patch cables.
+
+The upside of the direct connection: with no switch there is no
+auto-negotiation partner to disagree with, so **full duplex can be forced**.
+Set `PHCON1.PDPXMD` and `MACON3.FULDPX` on *both* boards for ~9.5 Mbit/s in
+each direction at once. Set it on one side only and you get a duplex mismatch:
+late collisions and throughput that collapses under load. Both or neither.
+
+## Roadmap
+
+| | Milestone | Exit criterion | State |
+|---|---|---|---|
+| M1 | SPI alive — `spi_master`, EREVID readback | `0x06` on the LEDs | Simulated ✓, hardware ✗ |
+| M2 | Link up — full init FSM, PHY config | Link LED on both boards | Not started |
+| M3 | Ping — RX/TX engines, ARP, ICMP echo | Sustained ping, 0% loss | Not started |
+| M4 | UDP echo — parsing, checksums | 10k datagrams echoed correctly | Not started |
+| M5 | Max speed — UDP blaster + measurement | ≥ 9.3 Mbit/s, loss-free | Not started |
+
+## Notes for anyone reusing this
+
+A few things that cost time and are not obvious from the datasheet or the
+Quartus docs:
+
+- **Quartus 25.1 rejects the device name `EP4CE6E22C8N`.** The legal part name
+  is `EP4CE6E22C8`, without the trailing N.
+- **`SLEW_RATE` and `CURRENT_STRENGTH` are both rejected** on ordinary user
+  I/O on this device — LVCMOS refuses current strength, LVTTL refuses slew
+  rate, and LVCMOS refuses slew rate too. Leave the I/O at default drive.
+- **An illegal I/O assignment makes the Fitter also report
+  `Error (171000): Can't fit design in device`,** which has nothing to do with
+  capacity. Fix the I/O error and the phantom fit error disappears.
+- **Every project needs an SDC declaring the clock,** or the Timing Analyzer
+  reports failure purely for the lack of a clock definition.
+- **`ESTAT.CLKRDY` is unreliable after a soft reset** (ENC28J60 errata). Use a
+  flat delay instead of polling it.
+- **`EREVID` is an Ethernet register, so its read needs no dummy byte** —
+  the data arrives in the second SPI byte. MAC and MII registers *do* need
+  one. Getting this backwards is the classic first-read bug.
+
+## Related
+
+- [ep4ce6e22-fpga-quickstart](https://github.com/bge007/ep4ce6e22-fpga-quickstart)
+  — getting this board programmed from Windows, including the clone
+  USB-Blaster workaround.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

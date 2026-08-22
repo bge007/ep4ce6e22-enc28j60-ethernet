@@ -1,0 +1,84 @@
+# enc28j60_eth.qsf -- EP4CE6E22 + ENC28J60 Ethernet node
+#
+# NOTE: Quartus 25.1std rejects "EP4CE6E22C8N". The legal part name is
+# EP4CE6E22C8 (no trailing N).
+
+set_global_assignment -name FAMILY "Cyclone IV E"
+set_global_assignment -name DEVICE EP4CE6E22C8
+set_global_assignment -name TOP_LEVEL_ENTITY eth_top
+set_global_assignment -name ORIGINAL_QUARTUS_VERSION 25.1
+set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
+set_global_assignment -name MIN_CORE_JUNCTION_TEMP 0
+set_global_assignment -name MAX_CORE_JUNCTION_TEMP 85
+set_global_assignment -name ERROR_CHECK_FREQUENCY_DIVISOR 1
+set_global_assignment -name NUM_PARALLEL_PROCESSORS 4
+
+set_global_assignment -name VERILOG_FILE rtl/eth_top.v
+set_global_assignment -name VERILOG_FILE rtl/spi_master.v
+set_global_assignment -name SDC_FILE enc28j60_eth.sdc
+
+# Unused pins as inputs tri-stated -- the ENC28J60 module shares the header,
+# don't drive anything unexpected into it.
+set_global_assignment -name RESERVE_ALL_UNUSED_PINS "AS INPUT TRI-STATED"
+
+# ---------------------------------------------------------------------------
+# BOARD PINS -- identical to led_button_test.qsf (verified working)
+# ---------------------------------------------------------------------------
+
+set_location_assignment PIN_24 -to clk
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to clk
+
+set_location_assignment PIN_88 -to nrst
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to nrst
+
+set_location_assignment PIN_114 -to key[0]
+set_location_assignment PIN_89  -to key[1]
+set_location_assignment PIN_80  -to key[2]
+set_location_assignment PIN_73  -to key[3]
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to key[0]
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to key[1]
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to key[2]
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to key[3]
+
+set_location_assignment PIN_1  -to led[0]
+set_location_assignment PIN_2  -to led[1]
+set_location_assignment PIN_3  -to led[2]
+set_location_assignment PIN_7  -to led[3]
+set_location_assignment PIN_11 -to led[4]
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to led[0]
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to led[1]
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to led[2]
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to led[3]
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to led[4]
+
+# ---------------------------------------------------------------------------
+# ENC28J60 MODULE -- >>> VERIFY THESE AGAINST YOUR BOARD'S HEADER SILKSCREEN
+# <<<
+#
+# These are free user I/O on the expansion header (the same region the
+# TM1638 project drives at PIN_103/104/105). Nothing else in this project
+# uses them, so they are safe as a starting point -- but confirm the header
+# pinout before plugging in, and keep the harness under ~10 cm.
+# ---------------------------------------------------------------------------
+
+set_location_assignment PIN_103 -to enc_sck
+set_location_assignment PIN_104 -to enc_mosi
+set_location_assignment PIN_105 -to enc_miso
+set_location_assignment PIN_106 -to enc_cs_n
+set_location_assignment PIN_110 -to enc_rst_n
+set_location_assignment PIN_111 -to enc_int
+
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to enc_sck
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to enc_mosi
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to enc_miso
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to enc_cs_n
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to enc_rst_n
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to enc_int
+
+# No SLEW_RATE / CURRENT_STRENGTH overrides here: this device rejects both on
+# these pins (errors 169303 / 169205), so the SPI lines run at the default
+# drive. Signal integrity at 12.5 MHz is a wiring problem instead -- keep the
+# harness under ~10 cm and give SCK its own ground return.
+
+set_global_assignment -name LAST_QUARTUS_VERSION "25.1std.0 Lite Edition"
+set_global_assignment -name RESERVE_ALL_UNUSED_PINS_NO_OUTPUT_GND "AS INPUT TRI-STATED"
