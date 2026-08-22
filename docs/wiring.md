@@ -1,13 +1,15 @@
 # Two-node wiring: Host A ⇄ Host B
 
-Two identical EP4CE6E22 + ENC28J60 nodes joined by one LAN cable.
+Two identical nodes — each an EP4CE6E22 board, an ENC28J60 Ethernet module and
+a 1.3" OLED — joined by one LAN cable.
 
-![Wiring diagram for both nodes. Each EP4CE6E22 board's right-hand header connects by eight colour-coded female-to-female DuPont jumpers to the ENC28J60 module's 2x5 header, and the two RJ45 jacks are joined by one crossover cable.](wiring-diagram.svg)
+![Wiring diagram for both nodes. Each EP4CE6E22 board's right-hand header connects by twelve colour-coded female-to-female DuPont jumpers to an ENC28J60 module's 2x5 header and a 1.3 inch OLED, and the two RJ45 jacks are joined by one crossover cable.](wiring-diagram.svg)
 
-Eight jumpers per node, sixteen in total. Wires cross in the drawing — follow
-the colour, not the path. The dashed purple `INT` line is optional; milestone
-1 polls `EPKTCNT` over SPI instead. `PIN_101` is marked ✗ because it is the
-`nCEO` configuration pin; see below.
+Twelve jumpers per node, twenty-four in total. Wires cross in the drawing —
+follow the colour, not the path. The dashed purple `INT` line is optional;
+milestone 1 polls `EPKTCNT` over SPI instead. The dashed red and grey lines are
+the 3.3 V and GND rails, shared between the two modules. `PIN_101` is marked ✗
+because it is the `nCEO` configuration pin; see below.
 
 ## The cable must be a crossover
 
@@ -28,9 +30,11 @@ any 10/100 switch between the two boards and use two ordinary patch cables.
 
 ## Per-board connections (identical on both hosts)
 
-Eight female-to-female 2.54 mm DuPont jumpers per node, sixteen in total. Both
-headers present male pins, so F-F is the correct cable and no breadboard is
-needed.
+Twelve female-to-female 2.54 mm DuPont jumpers per node, twenty-four in total.
+Every header involved presents male pins, so F-F is the correct cable and no
+breadboard is needed.
+
+### To the ENC28J60
 
 | Wire | FPGA board | Which header | ENC28J60 | Module row | IC pin |
 |---|---|---|---|---|---|
@@ -45,6 +49,28 @@ needed.
 
 Left empty on the module: `CLK` (programmable clock output — the FPGA has its
 own 50 MHz oscillator) and `WOL` (wake-on-LAN — nothing here sleeps).
+
+### To the 1.3" OLED
+
+| Wire | FPGA board | Which header | OLED |
+|---|---|---|---|
+| `oled_scl` | `85`   | right, row 5 left  | `SCL` |
+| `oled_sda` | `86`   | right, row 5 right | `SDA` |
+| VCC        | `3.3V` | **top**, right end | `VCC` — **3.3 V, not the 5 V on the silkscreen** |
+| GND        | `GND`  | right, bottom      | `GND` |
+
+> **Run the OLED at 3.3 V.** Its SDA and SCL pull-ups go to the module's own
+> VCC, so powering it at 5 V puts 5 V onto the I²C lines and into a 3.3 V
+> Cyclone IV bank. Measure both lines against ground before connecting them —
+> they idle high and should read ~3.3 V. Full reasoning in [oled.md](oled.md).
+
+Pins 85/86 are I/O **bank 5** while the ENC28J60 signals are bank 6. Both sit
+on the same fixed-3.3 V right header, so it makes no practical difference.
+
+**Both modules share the 3.3 V and GND rails.** These headers are two-row, so
+most positions offer a second pin to branch from. If yours does not,
+daisy-chain the second module off the first rather than forcing two DuPont
+sockets onto one pin.
 
 ### The ENC28J60 2×5 header
 
@@ -74,11 +100,12 @@ termination. You never touch them.
 
 The EP4CE6E22 board has three I/O headers and they are not equivalent:
 
-- **Right-hand header — fixed 3.3 V, I/O bank 6.** All six signals go here.
-  Two columns, reading down: `105|106`, `103|104`, `100|101`, `98|99`,
-  `85|86`, `77|83`, `76|78`, `30|31`, `32|33`, `34|NC`, then `GND` at the
-  bottom. Using the top rows keeps the whole SPI bus on one connector with
-  ground on the same strip.
+- **Right-hand header — fixed 3.3 V.** All eight signals go here: six SPI to
+  the ENC28J60 and two I²C to the OLED. Two columns, reading down: `105|106`,
+  `103|104`, `100|101`, `98|99`, `85|86`, `77|83`, `76|78`, `30|31`, `32|33`,
+  `34|NC`, then `GND` at the bottom. Using the top rows keeps both buses on one
+  connector with ground on the same strip. (Rows 1–4 are I/O bank 6 and row 5
+  is bank 5; the board ties both to the same 3.3 V rail.)
 - **Top header (C group) and bottom header (B group) — bank 7, voltage set by
   a jumper cap** to 3.3, 2.5, 1.8 or 1.2 V. The ENC28J60 drives `SO` and `INT`
   at 3.3 V, so an FPGA input there with VC/VB jumpered low is over-driven.
@@ -159,21 +186,24 @@ throughput that collapses under load. Both or neither.
 
 ## Bring-up order
 
-1. **Ground first.** The `GND` jumper from the bottom of the right-hand header
-   to the module's `GND`, before any other wire.
+1. **Ground first**, to both modules, before any other wire.
 2. **Then VCC** from the top header's `3.3V` pin. Power the board and confirm
-   3.3 V at the module before adding signals — its power LED should light.
-3. **Then the five required signals** — SCK, SI, SO, CS, RST. Leave INT for
-   later; milestone 1 does not use it.
-4. **Test each board alone.** Confirm `EREVID` = `0x06` with no cable
+   3.3 V at each module before adding signals. On the OLED, also measure SDA
+   and SCL against ground — if either reads ~5 V, stop and fix the supply
+   before connecting them to the FPGA.
+3. **Then the five required ENC28J60 signals** — SCK, SI, SO, CS, RST. Leave
+   INT for later; milestone 1 does not use it.
+4. **Then the OLED's SCL and SDA.** The panel should light and show the status
+   text within a second of configuration.
+5. **Test each board alone.** Confirm `EREVID` = `0x06` with no cable
    attached. A board that cannot reach its own controller over SPI will not be
    fixed by plugging in Ethernet.
-5. **Then the crossover cable.** Link LEDs on both modules should light within
+6. **Then the crossover cable.** Link LEDs on both modules should light within
    a second. Exactly one lit → suspect the cable. Neither lit → suspect PHY
    init.
-6. **Then ARP.** Host A ARPs for Host B's IP. A reply proves the whole path in
+7. **Then ARP.** Host A ARPs for Host B's IP. A reply proves the whole path in
    both directions: SPI out, transmit, cable, receive, SPI in.
-7. **Then throughput.** Host A streams 1,472-byte sequence-numbered UDP
+8. **Then throughput.** Host A streams 1,472-byte sequence-numbered UDP
    datagrams; Host B counts bytes and gaps.
 
 ## Image credits

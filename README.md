@@ -188,10 +188,11 @@ in the companion repo.
 Identical on both boards. Full detail, including the RJ45 crossover pinout, is
 in [docs/wiring.md](docs/wiring.md).
 
-![Wiring diagram for both nodes. Each EP4CE6E22 board's right-hand header connects by eight colour-coded female-to-female DuPont jumpers to the ENC28J60 module's 2x5 header, and the two RJ45 jacks are joined by one crossover cable.](docs/wiring-diagram.svg)
+![Wiring diagram for both nodes. Each EP4CE6E22 board's right-hand header connects by twelve colour-coded female-to-female DuPont jumpers to an ENC28J60 module's 2x5 header and a 1.3 inch OLED, and the two RJ45 jacks are joined by one crossover cable.](docs/wiring-diagram.svg)
 
-Eight female-to-female 2.54 mm DuPont jumpers per node. Both headers present
-male pins, so F-F is the correct cable.
+Twelve female-to-female 2.54 mm DuPont jumpers per node — eight to the
+ENC28J60, four to the OLED. Every header involved presents male pins, so F-F is
+the correct cable.
 
 | Wire | FPGA board | Which header | ENC28J60 | IC pin |
 |---|---|---|---|---|
@@ -200,12 +201,15 @@ male pins, so F-F is the correct cable.
 | `enc_miso`  | `103`  | right, row 2 left  | `SO`   | 6  |
 | `enc_cs_n`  | `104`  | right, row 2 right | `CS`   | 9  |
 | `enc_rst_n` | `100`  | right, row 3 left  | `RST`  | 10 |
-| `enc_int`   | `98`   | right, row 4 left  | `INT`  | 4  |
-| VCC         | `3.3V` | **top**, right end | `VCC`  | 28 |
-| GND         | `GND`  | right, bottom      | `GND`  | 2  |
+| `enc_int`   | `98`   | right, row 4 left  | ENC `INT`  | 4  |
+| `oled_scl`  | `85`   | right, row 5 left  | OLED `SCL` | —  |
+| `oled_sda`  | `86`   | right, row 5 right | OLED `SDA` | —  |
+| VCC         | `3.3V` | **top**, right end | both `VCC` | 28 |
+| GND         | `GND`  | right, bottom      | both `GND` | 2  |
 
-The module's 2×5 header reads down as `CLK|INT`, `WOL|SO`, `SI|SCK`,
-`CS|RST`, `VCC|GND`. `CLK` and `WOL` stay empty.
+The ENC28J60's 2×5 header reads down as `CLK|INT`, `WOL|SO`, `SI|SCK`,
+`CS|RST`, `VCC|GND`. `CLK` and `WOL` stay empty. Both modules share the 3.3 V
+and GND rails — see [docs/wiring.md](docs/wiring.md).
 
 ### Before you power anything on
 

@@ -49,8 +49,9 @@ works on this panel, this is the single most common SH1106 bug.
 
 ## Wiring
 
-Two more female-to-female jumpers per node, on the next free row of the same
-fixed-3.3 V right-hand header.
+Four more female-to-female jumpers per node — SCL and SDA on the next free row
+of the same fixed-3.3 V right-hand header, plus VCC and GND. That takes each
+node from eight jumpers to twelve, and the build from sixteen to twenty-four.
 
 | Wire | FPGA board | Which header | OLED module |
 |---|---|---|---|
