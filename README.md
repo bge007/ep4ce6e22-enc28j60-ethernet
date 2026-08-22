@@ -48,6 +48,79 @@ are all simultaneously working.
 
 The full stack is budgeted at ~2,500 LE, so there is plenty of room left.
 
+## Bill of materials
+
+A two-node link means two of nearly everything. Prices are rough marketplace
+figures in USD to give a sense of scale — they are not quotes and they drift.
+
+### Per node — buy two of each
+
+| # | Item | Qty | Spec that matters | ~$ |
+|---|---|---|---|---|
+| 1 | EP4CE6E22 Cyclone IV E core board | 1 | `EP4CE6E22C8N`, 144-LQFP, onboard CH340 + USB-C, 5 LEDs, 4 keys, 50 MHz osc | 12–20 |
+| 2 | ENC28J60 Ethernet module | 1 | **must** carry the RJ45 jack with integrated magnetics (HanRun `HR911105A` or equivalent) and a 25 MHz crystal; **3.3 V logic** | 3–6 |
+| 3 | USB-C cable | 1 | data-capable, not charge-only — it carries power *and* the CH340 serial port | 2–4 |
+| 4 | 100 nF ceramic capacitor | 1 | decoupling across the module's VCC/GND, as close to the header as you can get | <1 |
+| 5 | 10 µF capacitor | 1 | same place; ceramic or electrolytic both fine | <1 |
+
+### Shared across both nodes — buy one
+
+| # | Item | Qty | Spec that matters | ~$ |
+|---|---|---|---|---|
+| 6 | **Crossover** Cat5e patch cable | 1 | see the warning below — this is the item people get wrong | 3–6 |
+| 7 | Female-to-female DuPont jumpers, 2.54 mm | 16 used | buy a 40-way ribbon. **10 cm if you can find it**, 20 cm at the outside — see harness length below | 2–4 |
+| 8 | USB-Blaster JTAG programmer | 1 | 10-pin ribbon included; one programmer flashes both boards in turn | 5–10 |
+| 9 | USB power source | 1 | a powered hub or mains adapter, ≥1 A per board. A low-current laptop port is the usual cause of flaky behaviour | 5–12 |
+
+Rough total for a complete two-node build: **$50–90**.
+
+### Only if you hit rail sag
+
+| # | Item | Qty | When you need it | ~$ |
+|---|---|---|---|---|
+| 10 | AMS1117-3.3 regulator module, or a bench supply | 2 | Only if the link drops or the FPGA resets *specifically while transmitting*. See [Before you power anything on](#before-you-power-anything-on) | 1–3 |
+| 11 | Multimeter | 1 | Confirming 3.3 V at the module before you connect signal wires | — |
+
+### Software — all free
+
+| Item | Notes |
+|---|---|
+| Quartus Prime Lite 25.1 | Questa FSE simulator ships bundled; no separate install |
+| [openFPGALoader](https://github.com/trabucayre/openFPGALoader) | Programming path that works with clone blasters |
+| [Zadig](https://zadig.akeo.ie/) | Only if your USB-Blaster is a clone and needs the WinUSB driver |
+| Wireshark | Optional, for watching frames when testing a node against a PC |
+
+### Four purchasing traps
+
+1. **The Ethernet cable must be a crossover.** The ENC28J60 has no Auto-MDIX
+   and there is no switch in this topology, so a straight-through patch cable
+   wires transmitter to transmitter and the link LED never lights. Crossover
+   cables are increasingly hard to buy — the easy substitute is **any cheap
+   10/100 switch plus two ordinary patch cables**, which costs about the same
+   and does the crossing internally. You lose the ability to force full
+   duplex, dropping the link to ~9.5 Mbit/s one-way instead of each-way.
+2. **Female-to-female jumpers, not male-to-female.** Both the FPGA board
+   headers and the module's 2×5 header present *male* pins. Male-to-female
+   ribbons are the more common purchase and will not connect these two boards.
+3. **Short jumpers.** SPI runs at 12.5 MHz in milestone 1 and 20 MHz in the
+   final design, and Quartus rejects both slew-rate and drive-strength
+   overrides on this device — so signal integrity is entirely down to wiring.
+   Keep the harness under ~10 cm. A 30 cm ribbon is a false economy.
+4. **Check the module is 3.3 V logic.** The classic ENC28J60 breakout is, and
+   connects straight to the FPGA. Some variants aimed at 5 V Arduino boards
+   add level shifting; one of those driving 5 V back into a Cyclone IV input
+   will damage it.
+
+### Building with only one FPGA board
+
+If you have one board rather than two, most of the project still works: point
+the node at a PC instead of a second board. Milestones 1 through 4 — SPI
+readback, link up, ping, and UDP echo — all run fine against a PC's NIC, and
+you get Wireshark on the other end, which is a genuinely better debugging
+position than two silent FPGAs. You need a second board only for the two-node
+demo itself, and note that a PC link still needs the crossover cable (or a
+switch), because the ENC28J60's lack of Auto-MDIX is unchanged.
+
 ## Repository layout
 
 | Path | Contents |
