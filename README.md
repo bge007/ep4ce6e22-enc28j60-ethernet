@@ -130,6 +130,7 @@ switch), because the ENC28J60's lack of Auto-MDIX is unchanged.
 | [`tb/tb_m1.v`](tb/tb_m1.v) | Self-checking testbench + behavioral ENC28J60 SPI-slave model |
 | [`docs/plan.md`](docs/plan.md) | Design rationale, throughput budget, milestones, errata list |
 | [`docs/wiring.md`](docs/wiring.md) | Pin-by-pin wiring for both nodes, board photos, the crossover cable |
+| [`docs/wiring-diagram.svg`](docs/wiring-diagram.svg) | The colour-coded jumper diagram, as a standalone SVG |
 | [`docs/bringup.md`](docs/bringup.md) | How to read the LEDs, what each failure mode looks like |
 | [`build.ps1`](build.ps1) | Simulate, compile, and program in one command |
 
@@ -158,6 +159,8 @@ in the companion repo.
 
 Identical on both boards. Full detail, including the RJ45 crossover pinout, is
 in [docs/wiring.md](docs/wiring.md).
+
+![Wiring diagram for both nodes. Each EP4CE6E22 board's right-hand header connects by eight colour-coded female-to-female DuPont jumpers to the ENC28J60 module's 2x5 header, and the two RJ45 jacks are joined by one crossover cable.](docs/wiring-diagram.svg)
 
 Eight female-to-female 2.54 mm DuPont jumpers per node. Both headers present
 male pins, so F-F is the correct cable.

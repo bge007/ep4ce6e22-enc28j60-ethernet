@@ -2,6 +2,13 @@
 
 Two identical EP4CE6E22 + ENC28J60 nodes joined by one LAN cable.
 
+![Wiring diagram for both nodes. Each EP4CE6E22 board's right-hand header connects by eight colour-coded female-to-female DuPont jumpers to the ENC28J60 module's 2x5 header, and the two RJ45 jacks are joined by one crossover cable.](wiring-diagram.svg)
+
+Eight jumpers per node, sixteen in total. Wires cross in the drawing — follow
+the colour, not the path. The dashed purple `INT` line is optional; milestone
+1 polls `EPKTCNT` over SPI instead. `PIN_101` is marked ✗ because it is the
+`nCEO` configuration pin; see below.
+
 ## The cable must be a crossover
 
 The ENC28J60 has **no Auto-MDIX**, and with no switch in this topology there is
@@ -170,6 +177,9 @@ throughput that collapses under load. Both or neither.
    datagrams; Host B counts bytes and gaps.
 
 ## Image credits
+
+`wiring-diagram.svg` is original work of this project and is covered by the
+repository's MIT licence like the rest of the source.
 
 The three board photographs on this page — `pinout-ENC28J60.png`,
 `pinlayout-EP4CE6E22-fpga_board.jpg` and

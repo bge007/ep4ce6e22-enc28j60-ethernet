@@ -1,0 +1,145 @@
+﻿<!-- docs/wiring-diagram.svg
+     Two-node EP4CE6E22 + ENC28J60 wiring. Colours are baked literals rather
+     than CSS variables so the file renders standalone on GitHub. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1140" viewBox="0 0 1080 1140" role="img" aria-label="Physical DuPont wiring for two identical nodes. Each EP4CE6E22 board's right-hand header connects by eight female-to-female jumpers to the ENC28J60 module's two-by-five header, and the two RJ45 jacks are joined by one crossover cable.">
+  <rect width="1080" height="1140" fill="#fbfcfa"/>
+  <defs>
+    <marker id="cab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#14804a"/>
+    </marker>
+    <g id="node" font-family="IBM Plex Mono, monospace" font-size="10" fill="#21282b">
+      <rect x="30" y="34" width="430" height="312" rx="7" fill="#eaeee9" stroke="#21282b" stroke-width="1.4"/>
+      <text x="196" y="52" text-anchor="middle" font-size="10.5" font-weight="600">EP4CE6E22 core board</text>
+      <rect x="24" y="150" width="14" height="44" rx="3" fill="none" stroke="#21282b" stroke-width="1.2"/>
+      <text x="31" y="208" text-anchor="middle" font-size="7.5" fill="#69736e">USB-C</text>
+      <rect x="150" y="150" width="115" height="115" rx="3" fill="none" stroke="#21282b" stroke-width="1.3"/>
+      <text x="207" y="200" text-anchor="middle" font-size="9.5" font-weight="600">Cyclone IV</text>
+      <text x="207" y="214" text-anchor="middle" font-size="8" fill="#69736e">EP4CE6E22C8N</text>
+      <text x="207" y="232" text-anchor="middle" font-size="7.5" fill="#69736e">bank 6 â†’ right hdr</text>
+      <circle cx="60" cy="252" r="4" fill="none" stroke="#21282b"/>
+      <circle cx="72" cy="252" r="4" fill="none" stroke="#21282b"/>
+      <circle cx="84" cy="252" r="4" fill="none" stroke="#21282b"/>
+      <circle cx="96" cy="252" r="4" fill="none" stroke="#21282b"/>
+      <circle cx="108" cy="252" r="4" fill="none" stroke="#21282b"/>
+      <text x="84" y="272" text-anchor="middle" font-size="7.5" fill="#69736e">LEDs Â· EREVID</text>
+      <text x="60" y="74" font-size="7.5" fill="#69736e">top header â€” C group, VC set by jumper cap (not used here)</text>
+      <g fill="none" stroke="#21282b" stroke-width="0.9" opacity="0.5">
+        <rect x="60" y="80" width="7" height="7"/><rect x="72" y="80" width="7" height="7"/>
+        <rect x="84" y="80" width="7" height="7"/><rect x="96" y="80" width="7" height="7"/>
+        <rect x="108" y="80" width="7" height="7"/><rect x="120" y="80" width="7" height="7"/>
+        <rect x="132" y="80" width="7" height="7"/><rect x="144" y="80" width="7" height="7"/>
+        <rect x="156" y="80" width="7" height="7"/><rect x="168" y="80" width="7" height="7"/>
+        <rect x="180" y="80" width="7" height="7"/><rect x="192" y="80" width="7" height="7"/>
+        <rect x="204" y="80" width="7" height="7"/><rect x="216" y="80" width="7" height="7"/>
+        <rect x="228" y="80" width="7" height="7"/><rect x="240" y="80" width="7" height="7"/>
+        <rect x="60" y="92" width="7" height="7"/><rect x="72" y="92" width="7" height="7"/>
+        <rect x="84" y="92" width="7" height="7"/><rect x="96" y="92" width="7" height="7"/>
+        <rect x="108" y="92" width="7" height="7"/><rect x="120" y="92" width="7" height="7"/>
+        <rect x="132" y="92" width="7" height="7"/><rect x="144" y="92" width="7" height="7"/>
+        <rect x="156" y="92" width="7" height="7"/><rect x="168" y="92" width="7" height="7"/>
+        <rect x="180" y="92" width="7" height="7"/><rect x="192" y="92" width="7" height="7"/>
+        <rect x="204" y="92" width="7" height="7"/><rect x="216" y="92" width="7" height="7"/>
+        <rect x="228" y="92" width="7" height="7"/><rect x="240" y="92" width="7" height="7"/>
+      </g>
+      <rect x="262" y="80" width="9" height="9" fill="none" stroke="#21282b" stroke-width="1"/>
+      <rect x="280" y="80" width="9" height="9" fill="#d13d3d" stroke="#d13d3d" stroke-width="1"/>
+      <rect x="298" y="80" width="9" height="9" fill="none" stroke="#21282b" stroke-width="1"/>
+      <rect x="316" y="80" width="9" height="9" fill="none" stroke="#21282b" stroke-width="1"/>
+      <text x="266" y="103" text-anchor="middle" font-size="7">5V</text>
+      <text x="284" y="103" text-anchor="middle" font-size="7.5" font-weight="600" fill="#d13d3d">3.3V</text>
+      <text x="302" y="103" text-anchor="middle" font-size="7">2.5</text>
+      <text x="320" y="103" text-anchor="middle" font-size="7">GND</text>
+      <rect x="386" y="118" width="46" height="212" rx="3" fill="none" stroke="#21282b" stroke-width="1" opacity="0.55"/>
+      <text x="409" y="114" text-anchor="middle" font-size="7.5" font-weight="600" fill="#14804a">RIGHT HEADER</text>
+      <text x="409" y="342" text-anchor="middle" font-size="7" fill="#69736e">fixed 3.3 V Â· bank 6</text>
+      <rect x="392" y="126" width="10" height="10" fill="#d4a017" stroke="#d4a017"/>
+      <rect x="416" y="126" width="10" height="10" fill="#2b7fd4" stroke="#2b7fd4"/>
+      <text x="388" y="135" text-anchor="end" font-size="9" font-weight="600">105</text>
+      <text x="430" y="135" font-size="9" font-weight="600">106</text>
+      <rect x="392" y="146" width="10" height="10" fill="#14804a" stroke="#14804a"/>
+      <rect x="416" y="146" width="10" height="10" fill="#d4682a" stroke="#d4682a"/>
+      <text x="388" y="155" text-anchor="end" font-size="9" font-weight="600">103</text>
+      <text x="430" y="155" font-size="9" font-weight="600">104</text>
+      <rect x="392" y="166" width="10" height="10" fill="#8a7fb8" stroke="#8a7fb8"/>
+      <rect x="416" y="166" width="10" height="10" fill="none" stroke="#21282b" stroke-width="1" opacity="0.4"/>
+      <text x="388" y="175" text-anchor="end" font-size="9" font-weight="600">100</text>
+      <text x="430" y="175" font-size="8" fill="#69736e">101âœ—</text>
+      <rect x="392" y="186" width="10" height="10" fill="#9b59b6" stroke="#9b59b6"/>
+      <rect x="416" y="186" width="10" height="10" fill="none" stroke="#21282b" stroke-width="1" opacity="0.4"/>
+      <text x="388" y="195" text-anchor="end" font-size="9" font-weight="600">98</text>
+      <text x="430" y="195" font-size="8" fill="#69736e">99</text>
+      <g fill="none" stroke="#21282b" stroke-width="1" opacity="0.4">
+        <rect x="392" y="206" width="10" height="10"/><rect x="416" y="206" width="10" height="10"/>
+        <rect x="392" y="226" width="10" height="10"/><rect x="416" y="226" width="10" height="10"/>
+        <rect x="392" y="246" width="10" height="10"/><rect x="416" y="246" width="10" height="10"/>
+        <rect x="392" y="266" width="10" height="10"/><rect x="416" y="266" width="10" height="10"/>
+        <rect x="392" y="286" width="10" height="10"/><rect x="416" y="286" width="10" height="10"/>
+      </g>
+      <text x="388" y="215" text-anchor="end" font-size="7.5" fill="#69736e">85</text>
+      <text x="430" y="215" font-size="7.5" fill="#69736e">86</text>
+      <text x="388" y="295" text-anchor="end" font-size="7.5" fill="#69736e">34</text>
+      <text x="430" y="295" font-size="7.5" fill="#69736e">NC</text>
+      <rect x="392" y="308" width="10" height="10" fill="#7a8580" stroke="#7a8580"/>
+      <text x="388" y="317" text-anchor="end" font-size="9" font-weight="600">GND</text>
+      <rect x="620" y="34" width="400" height="312" rx="7" fill="#eaeee9" stroke="#21282b" stroke-width="1.4"/>
+      <text x="700" y="52" font-size="10.5" font-weight="600">ENC28J60 module</text>
+      <rect x="644" y="86" width="52" height="212" rx="3" fill="none" stroke="#21282b" stroke-width="1" opacity="0.55"/>
+      <text x="670" y="80" text-anchor="middle" font-size="7.5" font-weight="600" fill="#14804a">2Ã—5 HEADER</text>
+      <text x="670" y="312" text-anchor="middle" font-size="7" fill="#69736e">J1 Â· male pins</text>
+      <rect x="650" y="96" width="10" height="10" fill="none" stroke="#21282b" stroke-width="1" opacity="0.4"/>
+      <rect x="676" y="96" width="10" height="10" fill="#9b59b6" stroke="#9b59b6"/>
+      <text x="646" y="105" text-anchor="end" font-size="8" fill="#69736e">CLK</text>
+      <text x="692" y="105" font-size="9" font-weight="600">INT</text>
+      <rect x="650" y="136" width="10" height="10" fill="none" stroke="#21282b" stroke-width="1" opacity="0.4"/>
+      <rect x="676" y="136" width="10" height="10" fill="#14804a" stroke="#14804a"/>
+      <text x="646" y="145" text-anchor="end" font-size="8" fill="#69736e">WOL</text>
+      <text x="692" y="145" font-size="9" font-weight="600">SO</text>
+      <rect x="650" y="176" width="10" height="10" fill="#2b7fd4" stroke="#2b7fd4"/>
+      <rect x="676" y="176" width="10" height="10" fill="#d4a017" stroke="#d4a017"/>
+      <text x="646" y="185" text-anchor="end" font-size="9" font-weight="600">SI</text>
+      <text x="692" y="185" font-size="9" font-weight="600">SCK</text>
+      <rect x="650" y="216" width="10" height="10" fill="#d4682a" stroke="#d4682a"/>
+      <rect x="676" y="216" width="10" height="10" fill="#8a7fb8" stroke="#8a7fb8"/>
+      <text x="646" y="225" text-anchor="end" font-size="9" font-weight="600">CS</text>
+      <text x="692" y="225" font-size="9" font-weight="600">RST</text>
+      <rect x="650" y="256" width="10" height="10" fill="#d13d3d" stroke="#d13d3d"/>
+      <rect x="676" y="256" width="10" height="10" fill="#7a8580" stroke="#7a8580"/>
+      <text x="646" y="265" text-anchor="end" font-size="9" font-weight="600" fill="#d13d3d">VCC</text>
+      <text x="692" y="265" font-size="9" font-weight="600">GND</text>
+      <rect x="748" y="96" width="46" height="16" rx="7" fill="none" stroke="#21282b"/>
+      <text x="771" y="108" text-anchor="middle" font-size="7">25 MHz</text>
+      <rect x="748" y="140" width="56" height="120" rx="2" fill="none" stroke="#21282b" stroke-width="1.3"/>
+      <text x="776" y="196" text-anchor="middle" font-size="8.5" font-weight="600">ENC28J60</text>
+      <text x="776" y="208" text-anchor="middle" font-size="7" fill="#69736e">SSOP-28</text>
+      <line x1="804" y1="200" x2="836" y2="200" stroke="#14804a" stroke-width="1.6"/>
+      <rect x="836" y="130" width="102" height="140" rx="4" fill="none" stroke="#14804a" stroke-width="1.5"/>
+      <text x="887" y="190" text-anchor="middle" font-size="9.5" font-weight="600" fill="#14804a">HR911105A</text>
+      <text x="887" y="204" text-anchor="middle" font-size="7.5" fill="#69736e">RJ45 + magnetics</text>
+      <g fill="none" stroke-width="2.4" stroke-linecap="round">
+        <path d="M 397 131 C 470 118 590 181 681 181" stroke="#d4a017"/>
+        <path d="M 421 131 C 490 140 580 181 655 181" stroke="#2b7fd4"/>
+        <path d="M 397 151 C 470 138 590 141 681 141" stroke="#14804a"/>
+        <path d="M 421 151 C 500 160 570 221 655 221" stroke="#d4682a"/>
+        <path d="M 397 171 C 480 178 590 221 681 221" stroke="#8a7fb8"/>
+        <path d="M 397 191 C 500 196 560 101 681 101" stroke="#9b59b6" stroke-dasharray="7 4"/>
+        <path d="M 285 89 C 340 108 520 261 655 261" stroke="#d13d3d"/>
+        <path d="M 397 313 C 480 320 580 261 681 261" stroke="#7a8580"/>
+      </g>
+      <text x="540" y="360" text-anchor="middle" font-size="8" fill="#69736e">8 Ã— female-to-female DuPont, 2.54 mm â€” both headers are male pins</text>
+    </g>
+  </defs>
+  <text x="30" y="22" font-family="IBM Plex Mono, monospace" font-size="12" font-weight="600" fill="#14804a">HOST A Â· 192.168.1.60 Â· MAC 02:42:CE:60:00:01</text>
+  <use href="#node"/>
+  <polyline points="938,270 1050,270 1050,830 938,830" fill="none" stroke="#14804a" stroke-width="3"
+            marker-start="url(#cab)" marker-end="url(#cab)"/>
+  <rect x="300" y="400" width="520" height="58" rx="6" fill="#ffffff" stroke="#14804a" stroke-width="1.5"/>
+  <text x="560" y="423" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="11.5" font-weight="600" fill="#14804a">ONE CROSSOVER LAN CABLE</text>
+  <text x="560" y="441" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="#14804a">T568A one end, T568B the other â€” pins 1â†”3 and 2â†”6 swap</text>
+  <text x="30" y="582" font-family="IBM Plex Mono, monospace" font-size="12" font-weight="600" fill="#4a4b9c">HOST B Â· 192.168.1.61 Â· MAC 02:42:CE:60:00:02</text>
+  <use href="#node" y="560"/>
+  <g font-family="IBM Plex Mono, monospace" font-size="9" fill="#69736e">
+    <text x="30" y="1092">Wires cross â€” follow the colour, not the path. Dashed purple INT is optional (milestone 1 polls EPKTCNT over SPI instead).</text>
+    <text x="30" y="1108">PIN_101 is marked âœ—: it is the nCEO configuration pin, which the FPGA drives while configuring â€” leave it empty.</text>
+    <text x="30" y="1124">The two nodes are wired identically. Only the MAC/IP constants in the bitstream differ, plus the cable, which must cross.</text>
+  </g>
+</svg>
