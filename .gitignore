@@ -42,3 +42,7 @@ modelsim.ini
 Thumbs.db
 desktop.ini
 *~
+
+# Quartus resolves $readmemh relative to the project root, so build.ps1
+# copies the font there. The source of truth is rtl/font5x8.mem.
+/font5x8.mem

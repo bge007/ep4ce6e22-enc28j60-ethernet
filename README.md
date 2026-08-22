@@ -38,15 +38,30 @@ are all simultaneously working.
 
 | | |
 |---|---|
-| Simulation | Passes — self-checking testbench against a behavioral ENC28J60 model |
-| Quartus compile | 0 errors, 0 critical warnings |
-| Logic elements | 155 / 6,272 (2%) |
-| Registers | 88 |
-| Worst-case setup slack | +4.85 ns |
-| Worst-case hold slack | +0.45 ns |
+| Simulation | Passes — two self-checking testbenches, against behavioral ENC28J60 (SPI) and SH1106 (I²C) models |
+| Quartus compile | 0 errors |
+| Logic elements | 602 / 6,272 (10%) |
+| Registers | 221 |
+| Memory bits | 4,472 / 276,480 (2%) |
+| Worst-case setup slack | +4.53 ns |
+| Worst-case hold slack | +0.43 ns |
 | Hardware | **Not yet tested** |
 
-The full stack is budgeted at ~2,500 LE, so there is plenty of room left.
+**The OLED display also works.** Each node drives a 1.3" 128×64 SH1106 panel
+over I²C showing the board identity, the live EREVID readback, the host's IP,
+and a message line. Line 3 is the hook for milestone 4: Host A will write what
+it transmits, Host B what it receives. See [docs/oled.md](docs/oled.md) —
+including the two traps, powering it at 3.3 V rather than the 5 V on the
+silkscreen, and the SH1106's two-column RAM offset.
+
+```
+EP4CE6E22 ENC28J60
+EREVID 0x06 OK
+HOST A 192.168.1.60
+MSG --
+```
+
+The full stack is budgeted at ~2,500 LE on top of this, which still fits.
 
 ## Bill of materials
 
@@ -59,27 +74,28 @@ figures in USD to give a sense of scale — they are not quotes and they drift.
 |---|---|---|---|---|
 | 1 | EP4CE6E22 Cyclone IV E core board | 1 | `EP4CE6E22C8N`, 144-LQFP, onboard CH340 + USB-C, 5 LEDs, 4 keys, 50 MHz osc | 12–20 |
 | 2 | ENC28J60 Ethernet module | 1 | **must** carry the RJ45 jack with integrated magnetics (HanRun `HR911105A` or equivalent) and a 25 MHz crystal; **3.3 V logic** | 3–6 |
-| 3 | USB-C cable | 1 | data-capable, not charge-only — it carries power *and* the CH340 serial port | 2–4 |
-| 4 | 100 nF ceramic capacitor | 1 | decoupling across the module's VCC/GND, as close to the header as you can get | <1 |
-| 5 | 10 µF capacitor | 1 | same place; ceramic or electrolytic both fine | <1 |
+| 3 | 1.3" I²C OLED, 128×64 | 1 | 4-pin (VCC/GND/SCL/SDA). Controller is **SH1106**, panel QG-2864KSWLG01. **Run it at 3.3 V — see the warning below** | 4–8 |
+| 4 | USB-C cable | 1 | data-capable, not charge-only — it carries power *and* the CH340 serial port | 2–4 |
+| 5 | 100 nF ceramic capacitor | 1 | decoupling across the ENC28J60's VCC/GND, as close to the header as you can get | <1 |
+| 6 | 10 µF capacitor | 1 | same place; ceramic or electrolytic both fine | <1 |
 
 ### Shared across both nodes — buy one
 
 | # | Item | Qty | Spec that matters | ~$ |
 |---|---|---|---|---|
-| 6 | **Crossover** Cat5e patch cable | 1 | see the warning below — this is the item people get wrong | 3–6 |
-| 7 | Female-to-female DuPont jumpers, 2.54 mm | 16 used | buy a 40-way ribbon. **10 cm if you can find it**, 20 cm at the outside — see harness length below | 2–4 |
-| 8 | USB-Blaster JTAG programmer | 1 | 10-pin ribbon included; one programmer flashes both boards in turn | 5–10 |
-| 9 | USB power source | 1 | a powered hub or mains adapter, ≥1 A per board. A low-current laptop port is the usual cause of flaky behaviour | 5–12 |
+| 7 | **Crossover** Cat5e patch cable | 1 | see the warning below — this is the item people get wrong | 3–6 |
+| 8 | Female-to-female DuPont jumpers, 2.54 mm | 24 used | buy a 40-way ribbon. **10 cm if you can find it**, 20 cm at the outside — see harness length below | 2–4 |
+| 9 | USB-Blaster JTAG programmer | 1 | 10-pin ribbon included; one programmer flashes both boards in turn | 5–10 |
+| 10 | USB power source | 1 | a powered hub or mains adapter, ≥1 A per board. A low-current laptop port is the usual cause of flaky behaviour | 5–12 |
 
-Rough total for a complete two-node build: **$50–90**.
+Rough total for a complete two-node build: **$60–110**.
 
 ### Only if you hit rail sag
 
 | # | Item | Qty | When you need it | ~$ |
 |---|---|---|---|---|
-| 10 | AMS1117-3.3 regulator module, or a bench supply | 2 | Only if the link drops or the FPGA resets *specifically while transmitting*. See [Before you power anything on](#before-you-power-anything-on) | 1–3 |
-| 11 | Multimeter | 1 | Confirming 3.3 V at the module before you connect signal wires | — |
+| 11 | AMS1117-3.3 regulator module, or a bench supply | 2 | Only if the link drops or the FPGA resets *specifically while transmitting*. See [Before you power anything on](#before-you-power-anything-on) | 1–3 |
+| 12 | Multimeter | 1 | **Not really optional.** Confirming 3.3 V at both modules — and that the OLED's I²C lines idle at 3.3 V, not 5 V — before connecting signal wires | — |
 
 ### Software — all free
 
@@ -90,7 +106,7 @@ Rough total for a complete two-node build: **$50–90**.
 | [Zadig](https://zadig.akeo.ie/) | Only if your USB-Blaster is a clone and needs the WinUSB driver |
 | Wireshark | Optional, for watching frames when testing a node against a PC |
 
-### Four purchasing traps
+### Five purchasing traps
 
 1. **The Ethernet cable must be a crossover.** The ENC28J60 has no Auto-MDIX
    and there is no switch in this topology, so a straight-through patch cable
@@ -106,10 +122,16 @@ Rough total for a complete two-node build: **$50–90**.
    final design, and Quartus rejects both slew-rate and drive-strength
    overrides on this device — so signal integrity is entirely down to wiring.
    Keep the harness under ~10 cm. A 30 cm ribbon is a false economy.
-4. **Check the module is 3.3 V logic.** The classic ENC28J60 breakout is, and
+4. **Check the ENC28J60 module is 3.3 V logic.** The classic breakout is, and
    connects straight to the FPGA. Some variants aimed at 5 V Arduino boards
    add level shifting; one of those driving 5 V back into a Cyclone IV input
    will damage it.
+5. **The OLED is sold as a 5 V module — run it at 3.3 V anyway.** Its SDA and
+   SCL pull-ups go to its own VCC, so powering it at 5 V puts 5 V on the I²C
+   lines and straight into a 3.3 V FPGA bank. At 3.3 V the pull-ups are 3.3 V
+   and everything is safe, which is also what the SH1106 wants — the datasheet
+   gives VDD as 1.65–3.3 V. Measure SDA and SCL against ground before
+   connecting them. Details in [docs/oled.md](docs/oled.md).
 
 ### Building with only one FPGA board
 
@@ -126,8 +148,14 @@ switch), because the ENC28J60's lack of Auto-MDIX is unchanged.
 | Path | Contents |
 |---|---|
 | [`rtl/spi_master.v`](rtl/spi_master.v) | Byte-streaming SPI master, mode 0, burst-capable |
-| [`rtl/eth_top.v`](rtl/eth_top.v) | M1 top level: reset sequencing, EREVID read, LED display |
+| [`rtl/i2c_master.v`](rtl/i2c_master.v) | Write-only open-drain I²C master, 400 kHz |
+| [`rtl/oled_sh1106.v`](rtl/oled_sh1106.v) | SH1106 OLED driver: init, page addressing, 4×21 text |
+| [`rtl/font5x8.mem`](rtl/font5x8.mem) | ASCII 32–126 font, generated — don't hand-edit |
+| [`rtl/eth_top.v`](rtl/eth_top.v) | Top level: reset sequencing, EREVID read, LEDs, OLED status |
 | [`tb/tb_m1.v`](tb/tb_m1.v) | Self-checking testbench + behavioral ENC28J60 SPI-slave model |
+| [`tb/tb_oled.v`](tb/tb_oled.v) | Self-checking testbench + behavioral SH1106 I²C slave model |
+| [`docs/oled.md`](docs/oled.md) | SH1106 column offset, the 3.3 V warning, driver internals |
+| [`tools/`](tools/) | Generators for the font and the wiring diagram |
 | [`docs/plan.md`](docs/plan.md) | Design rationale, throughput budget, milestones, errata list |
 | [`docs/wiring.md`](docs/wiring.md) | Pin-by-pin wiring for both nodes, board photos, the crossover cable |
 | [`docs/wiring-diagram.svg`](docs/wiring-diagram.svg) | The colour-coded jumper diagram, as a standalone SVG |
@@ -218,10 +246,17 @@ late collisions and throughput that collapses under load. Both or neither.
 | | Milestone | Exit criterion | State |
 |---|---|---|---|
 | M1 | SPI alive — `spi_master`, EREVID readback | `0x06` on the LEDs | Simulated ✓, hardware ✗ |
+| M1.5 | OLED — I²C master, SH1106 driver, status text | Status text on the panel | Simulated ✓, hardware ✗ |
 | M2 | Link up — full init FSM, PHY config | Link LED on both boards | Not started |
 | M3 | Ping — RX/TX engines, ARP, ICMP echo | Sustained ping, 0% loss | Not started |
-| M4 | UDP echo — parsing, checksums | 10k datagrams echoed correctly | Not started |
+| M4 | UDP echo + **message display** | Host A sends `Hello World`, Host B shows it | Not started |
 | M5 | Max speed — UDP blaster + measurement | ≥ 9.3 Mbit/s, loss-free | Not started |
+
+The headline demo — **`Hello World` typed on Host A appearing on Host B's
+screen** — lands at M4. Both halves it depends on now exist in some form: the
+display works, and the message protocol is defined (a UDP datagram to port
+1234 whose payload is up to 21 ASCII characters). What is missing between them
+is the Ethernet stack itself, M2 and M3.
 
 ## Notes for anyone reusing this
 
@@ -255,7 +290,7 @@ Quartus docs:
 MIT — see [LICENSE](LICENSE). This covers the source code and the written
 documentation.
 
-The three board photographs in [`docs/`](docs/) are vendor product and manual
-images, included for reference and identification. They are not original work
-of this project and are not covered by the MIT licence — see
-[Image credits](docs/wiring.md#image-credits).
+The board photographs and the SH1106 panel datasheet in [`docs/`](docs/) are
+vendor product, manual and datasheet material, included for reference and
+identification. They are not original work of this project and are not covered
+by the MIT licence — see [Image credits](docs/wiring.md#image-credits).

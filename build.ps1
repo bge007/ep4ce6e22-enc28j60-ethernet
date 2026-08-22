@@ -47,13 +47,21 @@ if (-not $Prog) {
     if (-not (Test-Path sim)) { New-Item -ItemType Directory sim | Out-Null }
     Set-Location sim
     if (-not (Test-Path work)) { vlib work }
-    vlog -sv ../rtl/spi_master.v ../rtl/eth_top.v ../tb/tb_m1.v
+    # $readmemh resolves relative to the simulation working directory.
+    Copy-Item ..\rtl\font5x8.mem . -Force
+
+    vlog -sv ../rtl/spi_master.v ../rtl/i2c_master.v ../rtl/oled_sh1106.v `
+             ../rtl/eth_top.v ../tb/tb_m1.v ../tb/tb_oled.v
     if (-not $?) { throw "vlog failed" }
-    $out = (vsim -c -do "run -all; quit -f" tb_m1) -join "`n"
-    Write-Host $out
-    # -join first: on an array, -match/-notmatch filters instead of returning
-    # a boolean, so an array test here silently always "fails".
-    if ($out -notmatch "PASS:") { throw "Simulation did not report PASS" }
+
+    foreach ($tb in @("tb_m1", "tb_oled")) {
+        Write-Host "--- $tb ---" -ForegroundColor DarkCyan
+        $out = (vsim -c -do "run -all; quit -f" $tb) -join "`n"
+        Write-Host $out
+        # -join first: on an array, -match/-notmatch filters instead of
+        # returning a boolean, so an array test silently always "fails".
+        if ($out -notmatch "PASS:") { throw "$tb did not report PASS" }
+    }
     Set-Location $root
     if ($Sim) { Write-Host "Simulation passed." -ForegroundColor Green; exit 0 }
 }
@@ -61,6 +69,8 @@ if (-not $Prog) {
 # ---- synthesise --------------------------------------------------------
 Write-Host "=== Compiling (Quartus) ===" -ForegroundColor Cyan
 $env:PATH = "$QUARTUS;$env:PATH"
+# Quartus resolves $readmemh relative to the project root, not rtl/.
+Copy-Item rtl\font5x8.mem . -Force
 quartus_sh --flow compile enc28j60_eth
 if (-not $?) { throw "Quartus compile failed -- see output_files\*.rpt" }
 

@@ -15,6 +15,8 @@ set_global_assignment -name NUM_PARALLEL_PROCESSORS 4
 
 set_global_assignment -name VERILOG_FILE rtl/eth_top.v
 set_global_assignment -name VERILOG_FILE rtl/spi_master.v
+set_global_assignment -name VERILOG_FILE rtl/i2c_master.v
+set_global_assignment -name VERILOG_FILE rtl/oled_sh1106.v
 set_global_assignment -name SDC_FILE enc28j60_eth.sdc
 
 # Unused pins as inputs tri-stated -- the ENC28J60 module shares the header,
@@ -94,6 +96,30 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to enc_miso
 set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to enc_cs_n
 set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to enc_rst_n
 set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to enc_int
+
+# ---------------------------------------------------------------------------
+# 1.3" SH1106 OLED (I2C) -- right header row 5 (pins 85/86).
+#
+# Still the fixed-3.3 V right-hand header, but note these two are I/O bank 5
+# where the ENC28J60 signals are bank 6. The right header spans both banks and
+# the board ties both to the same fixed 3.3 V rail, so this is fine -- it is
+# only worth knowing if you ever read the fitter's bank report and wonder.
+#
+# POWER THE PANEL FROM 3.3 V, NOT 5 V. The module's SDA/SCL pull-ups go to its
+# own VCC, so a 5 V-powered module presents 5 V to these pins and damages the
+# bank. The SH1106 datasheet puts VDD at 1.65-3.3 V and says it must equal the
+# MPU I/O voltage, so 3.3 V is also what the controller wants.
+#
+# These are true open-drain outputs driven by i2c_master, which only ever pulls
+# low and otherwise releases to Z. No FPGA-side pull-up is enabled; the panel's
+# 4.7k resistors do the job.
+# ---------------------------------------------------------------------------
+
+set_location_assignment PIN_85 -to oled_scl
+set_location_assignment PIN_86 -to oled_sda
+
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to oled_scl
+set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to oled_sda
 
 # No SLEW_RATE / CURRENT_STRENGTH overrides here: this device rejects both on
 # these pins (errors 169303 / 169205), so the SPI lines run at the default
