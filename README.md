@@ -129,7 +129,7 @@ switch), because the ENC28J60's lack of Auto-MDIX is unchanged.
 | [`rtl/eth_top.v`](rtl/eth_top.v) | M1 top level: reset sequencing, EREVID read, LED display |
 | [`tb/tb_m1.v`](tb/tb_m1.v) | Self-checking testbench + behavioral ENC28J60 SPI-slave model |
 | [`docs/plan.md`](docs/plan.md) | Design rationale, throughput budget, milestones, errata list |
-| [`docs/wiring.md`](docs/wiring.md) | Pin-by-pin wiring for both nodes and the crossover cable |
+| [`docs/wiring.md`](docs/wiring.md) | Pin-by-pin wiring for both nodes, board photos, the crossover cable |
 | [`docs/bringup.md`](docs/bringup.md) | How to read the LEDs, what each failure mode looks like |
 | [`build.ps1`](build.ps1) | Simulate, compile, and program in one command |
 
@@ -249,4 +249,10 @@ Quartus docs:
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). This covers the source code and the written
+documentation.
+
+The three board photographs in [`docs/`](docs/) are vendor product and manual
+images, included for reference and identification. They are not original work
+of this project and are not covered by the MIT licence — see
+[Image credits](docs/wiring.md#image-credits).

@@ -52,11 +52,18 @@ CS  | RST
 VCC | GND
 ```
 
+![ENC28J60 module pinout, showing the 2x5 header labelled CLK/INT, WOL/SO, SI/SCK, CS/RST, VCC/GND alongside the HR911105A RJ45 jack](pinout-ENC28J60.png)
+
+All ten pins are present on every module, but **the physical order differs
+between vendors** — match by printed label, not by position in this photo.
+
 `TPOUT±` → RJ45 pins 1,2 and `TPIN±` ← RJ45 pins 3,6 are wired inside the
 breakout through the magnetics, along with the RBIAS resistor and
 termination. You never touch them.
 
 ### Use the right-hand FPGA header, not the top or bottom
+
+![EP4CE6E22 core board, showing the top header numbered 144 down to 110 with VC voltage-select pins, the right-hand header in pairs from 105/106 down to 34/NC with GND at the bottom, and the bottom header with VB voltage-select pins](pinlayout-EP4CE6E22-fpga_board.jpg)
 
 The EP4CE6E22 board has three I/O headers and they are not equivalent:
 
@@ -81,7 +88,17 @@ The EP4CE6E22 board has three I/O headers and they are not equivalent:
 
 > **Match the module header by printed label, not by position.** ENC28J60
 > breakouts ship with several different 2×5 layouts between vendors. The order
-> above is from the HanRun module photographed for this project.
+> above is from the HanRun module shown in the photo.
+
+The board vendor's own annotated diagram states the rule directly — "the right
+pin is a fixed 3.3V voltage pin", while both the C and B groups need a jumper
+cap to select VC/VB:
+
+![Annotated EP4CE6E22 board diagram, labelling the upper C group and lower B group as jumper-selectable voltage pins, the right-hand pins as fixed 3.3V, plus the JTAG header pinout and the USB-C power input](pinout-EP4CE6E22-fpga_board_info.jpg)
+
+That same diagram gives the JTAG header pinout, which is worth having when
+wiring a USB-Blaster: `GND / NC / NC / 2.5V / GND` down one side and
+`TDI / NC / TMS / TDO / TCK` down the other.
 
 ### Power
 
@@ -151,3 +168,15 @@ throughput that collapses under load. Both or neither.
    both directions: SPI out, transmit, cable, receive, SPI in.
 7. **Then throughput.** Host A streams 1,472-byte sequence-numbered UDP
    datagrams; Host B counts bytes and gaps.
+
+## Image credits
+
+The three board photographs on this page — `pinout-ENC28J60.png`,
+`pinlayout-EP4CE6E22-fpga_board.jpg` and
+`pinout-EP4CE6E22-fpga_board_info.jpg` — are **vendor product and manual
+images**, reproduced here for identification and reference. They are not
+original work of this project and are **not covered by the repository's MIT
+licence**, which applies to the source code and written documentation only.
+
+If you are the rights holder and would prefer they were removed, please open
+an issue and they will be taken down.
