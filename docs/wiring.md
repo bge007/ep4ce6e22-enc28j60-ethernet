@@ -21,29 +21,85 @@ any 10/100 switch between the two boards and use two ordinary patch cables.
 
 ## Per-board connections (identical on both hosts)
 
-| FPGA net | FPGA pin | Dir | Module header | ENC28J60 IC pin | Note |
+Eight female-to-female 2.54 mm DuPont jumpers per node, sixteen in total. Both
+headers present male pins, so F-F is the correct cable and no breadboard is
+needed.
+
+| Wire | FPGA board | Which header | ENC28J60 | Module row | IC pin |
 |---|---|---|---|---|---|
-| `enc_sck`   | PIN_103 | → | `SCK`   | 8  | 12.5 MHz in M1, 20 MHz final |
-| `enc_mosi`  | PIN_104 | → | `SI`    | 7  | master out |
-| `enc_miso`  | PIN_105 | ← | `SO`    | 6  | master in |
-| `enc_cs_n`  | PIN_106 | → | `CS`    | 9  | active low, held low across a burst |
-| `enc_rst_n` | PIN_110 | → | `RESET` | 10 | hold low ≥1 ms at power-up |
-| `enc_int`   | PIN_111 | ← | `INT`   | 4  | optional — M1 polls `EPKTCNT` |
-| 3.3 V | — | — | `VCC` | 28 | **own regulator**, not an FPGA pin |
-| GND | GND | — | `GND` | 2 | common ground, mandatory |
+| `enc_sck`   | `105`  | right, row 1 left  | `SCK`  | 3 right | 8  |
+| `enc_mosi`  | `106`  | right, row 1 right | `SI`   | 3 left  | 7  |
+| `enc_miso`  | `103`  | right, row 2 left  | `SO`   | 2 right | 6  |
+| `enc_cs_n`  | `104`  | right, row 2 right | `CS`   | 4 left  | 9  |
+| `enc_rst_n` | `100`  | right, row 3 left  | `RST`  | 4 right | 10 |
+| `enc_int`   | `98`   | right, row 4 left  | `INT`  | 1 right | 4  |
+| VCC         | `3.3V` | **top**, right end | `VCC`  | 5 left  | 28 |
+| GND         | `GND`  | right, bottom      | `GND`  | 5 right | 2  |
+
+Left empty on the module: `CLK` (programmable clock output — the FPGA has its
+own 50 MHz oscillator) and `WOL` (wake-on-LAN — nothing here sleeps).
+
+### The ENC28J60 2×5 header
+
+Silkscreen order on the HanRun/HR911105A module, reading down with the RJ45 to
+the right:
+
+```
+CLK | INT
+WOL | SO
+SI  | SCK
+CS  | RST
+VCC | GND
+```
 
 `TPOUT±` → RJ45 pins 1,2 and `TPIN±` ← RJ45 pins 3,6 are wired inside the
 breakout through the magnetics, along with the RBIAS resistor and
 termination. You never touch them.
 
-> **Match the module header by label, not by position.** ENC28J60 breakouts
-> ship with several different 2×5 header layouts. The FPGA pin numbers were
-> taken from the other projects' pinouts on this board rather than a header
-> diagram — check both against the silkscreen before powering on.
+### Use the right-hand FPGA header, not the top or bottom
 
-Power: the module draws up to ~180 mA transmitting. Give it its own 3.3 V
-regulator rated ≥300 mA, tie grounds to the FPGA, and decouple with
-100 nF + 10 µF at the module.
+The EP4CE6E22 board has three I/O headers and they are not equivalent:
+
+- **Right-hand header — fixed 3.3 V, I/O bank 6.** All six signals go here.
+  Two columns, reading down: `105|106`, `103|104`, `100|101`, `98|99`,
+  `85|86`, `77|83`, `76|78`, `30|31`, `32|33`, `34|NC`, then `GND` at the
+  bottom. Using the top rows keeps the whole SPI bus on one connector with
+  ground on the same strip.
+- **Top header (C group) and bottom header (B group) — bank 7, voltage set by
+  a jumper cap** to 3.3, 2.5, 1.8 or 1.2 V. The ENC28J60 drives `SO` and `INT`
+  at 3.3 V, so an FPGA input there with VC/VB jumpered low is over-driven.
+  An earlier revision of this project used `PIN_110`/`PIN_111` from the C
+  group for exactly that reason — don't go back to it. The only thing taken
+  from the top header now is the `3.3V` *power* pin, which is a fixed rail and
+  not bank-dependent.
+
+> **`PIN_101` is deliberately skipped.** It is the `nCEO` configuration pin.
+> Quartus will release it as regular I/O with
+> `CYCLONEII_RESERVE_NCEO_AFTER_CONFIGURATION`, but the FPGA *drives* nCEO
+> during configuration while the ENC28J60 drives `INT` — output against
+> output, every time the board configures. `INT` lives on `PIN_98` instead.
+
+> **Match the module header by printed label, not by position.** ENC28J60
+> breakouts ship with several different 2×5 layouts between vendors. The order
+> above is from the HanRun module photographed for this project.
+
+### Power
+
+The board carries an AMS1117-3.3 and brings a `3.3V` pin out at the right end
+of the top header, so **take VCC from that pin**. It is one jumper instead of
+a separate supply, and the regulator has headroom on paper: the module's
+~180 mA transmit peak against a part rated 1 A, dissipating roughly 0.3 W
+extra in a SOT-223 package.
+
+Two conditions. Feed the board from a real USB-C supply or a powered hub
+rather than a low-current laptop port, and keep 100 nF + 10 µF decoupling at
+the module — the current spikes when the transmitter fires are what upset a
+shared rail, not the average draw.
+
+**The symptom that means you need a separate supply:** the link works at idle
+but drops, resets, or corrupts frames specifically while transmitting, or the
+FPGA re-configures under load. That is rail sag, not a logic bug. Move VCC to
+its own 3.3 V supply with grounds tied together rather than debugging the RTL.
 
 ## What differs between the hosts
 
@@ -79,13 +135,19 @@ throughput that collapses under load. Both or neither.
 
 ## Bring-up order
 
-1. **Power first, cable second.** Confirm `EREVID` = `0x06` on each board
-   independently with no cable attached. A board that cannot reach its own
-   controller over SPI will not be fixed by plugging in Ethernet.
-2. **Then the crossover cable.** Link LEDs on both modules should light within
+1. **Ground first.** The `GND` jumper from the bottom of the right-hand header
+   to the module's `GND`, before any other wire.
+2. **Then VCC** from the top header's `3.3V` pin. Power the board and confirm
+   3.3 V at the module before adding signals — its power LED should light.
+3. **Then the five required signals** — SCK, SI, SO, CS, RST. Leave INT for
+   later; milestone 1 does not use it.
+4. **Test each board alone.** Confirm `EREVID` = `0x06` with no cable
+   attached. A board that cannot reach its own controller over SPI will not be
+   fixed by plugging in Ethernet.
+5. **Then the crossover cable.** Link LEDs on both modules should light within
    a second. Exactly one lit → suspect the cable. Neither lit → suspect PHY
    init.
-3. **Then ARP.** Host A ARPs for Host B's IP. A reply proves the whole path in
+6. **Then ARP.** Host A ARPs for Host B's IP. A reply proves the whole path in
    both directions: SPI out, transmit, cable, receive, SPI in.
-4. **Then throughput.** Host A streams 1,472-byte sequence-numbered UDP
+7. **Then throughput.** Host A streams 1,472-byte sequence-numbered UDP
    datagrams; Host B counts bytes and gaps.

@@ -40,26 +40,30 @@ with the button held, correct silicon shows all LEDs dark.
 
 ## Wiring
 
-| ENC28J60 module | FPGA pin | Direction |
-|---|---|---|
-| `SCK`   | PIN_103 | FPGA → module |
-| `SI` (MOSI) | PIN_104 | FPGA → module |
-| `SO` (MISO) | PIN_105 | module → FPGA |
-| `CS`    | PIN_106 | FPGA → module |
-| `RESET` | PIN_110 | FPGA → module |
-| `INT`   | PIN_111 | module → FPGA (unused in M1) |
+All six signals are on the board's **right-hand header** — the fixed 3.3 V
+group, I/O bank 6. Full detail, including the module's 2×5 layout and why the
+top/bottom headers are unsuitable, is in [wiring.md](wiring.md).
 
-> **Verify these against your board's header silkscreen before plugging in.**
-> They are free user I/O in the same region the TM1638 project drives, but
-> they were chosen from the other projects' pinouts, not from a header
-> diagram.
+| ENC28J60 module | FPGA pin | Right-header position | Direction |
+|---|---|---|---|
+| `SCK`   | PIN_105 | row 1 left  | FPGA → module |
+| `SI` (MOSI) | PIN_106 | row 1 right | FPGA → module |
+| `SO` (MISO) | PIN_103 | row 2 left  | module → FPGA |
+| `CS`    | PIN_104 | row 2 right | FPGA → module |
+| `RST`   | PIN_100 | row 3 left  | FPGA → module |
+| `INT`   | PIN_98  | row 4 left  | module → FPGA (unused in M1) |
+
+`PIN_101` sits between `100` and `98` and is deliberately empty — it is the
+`nCEO` configuration pin, which the FPGA drives while configuring.
 
 Two things that cause most first-time failures:
 
-- **Power.** The ENC28J60 draws up to ~180 mA transmitting — more than an
-  FPGA board's 3.3 V pin should be asked to supply. Feed the module from its
-  own regulator, tie grounds together, and decouple with 100 nF + 10 µF at
-  the module.
+- **Power.** The ENC28J60 draws up to ~180 mA transmitting. Take VCC from the
+  `3.3V` pin at the right end of the top header, feed the board from a real
+  USB-C supply rather than a low-current laptop port, and decouple with
+  100 nF + 10 µF at the module. If the link drops or the FPGA resets
+  *specifically while transmitting*, that is rail sag — move VCC to its own
+  3.3 V supply with grounds tied together.
 - **Harness length.** Keep it under ~10 cm and give SCK its own ground
   return. Quartus rejects both `SLEW_RATE` and `CURRENT_STRENGTH` overrides
   on these pins on this device (errors 169303 / 169205), so the SPI lines run
@@ -89,8 +93,8 @@ Quartus 25.1 Lite full compile, 0 errors:
 | Registers | 88 |
 | Pins | 17 / 92 |
 | M9K / PLLs used | 0 / 0 |
-| Worst-case setup slack | +7.29 ns |
-| Worst-case hold slack | +0.40 ns |
+| Worst-case setup slack | +4.85 ns |
+| Worst-case hold slack | +0.45 ns |
 
 The full stack is budgeted at ~2,500 LE, so this leaves ample room.
 

@@ -14,9 +14,12 @@ design rationale.
 > Unlike [ep4ce6e22-fpga-quickstart](https://github.com/bge007/ep4ce6e22-fpga-quickstart),
 > where everything was verified on a real board before publishing, this repo is
 > work in progress. What exists is checked by simulation and compiles cleanly
-> with timing met — but no part of it has driven a physical ENC28J60 yet. The
-> pin assignments in particular are **unverified**; see
-> [Before you power anything on](#before-you-power-anything-on).
+> with timing met — but no part of it has driven a physical ENC28J60 yet.
+>
+> Pin assignments *are* now taken from the actual board layout rather than
+> guessed, and all six signals sit in the fixed-3.3 V bank 6; see
+> [Before you power anything on](#before-you-power-anything-on) for the
+> reasoning and the two pins to avoid.
 
 ---
 
@@ -39,8 +42,8 @@ are all simultaneously working.
 | Quartus compile | 0 errors, 0 critical warnings |
 | Logic elements | 155 / 6,272 (2%) |
 | Registers | 88 |
-| Worst-case setup slack | +7.29 ns |
-| Worst-case hold slack | +0.40 ns |
+| Worst-case setup slack | +4.85 ns |
+| Worst-case hold slack | +0.45 ns |
 | Hardware | **Not yet tested** |
 
 The full stack is budgeted at ~2,500 LE, so there is plenty of room left.
@@ -83,30 +86,40 @@ in the companion repo.
 Identical on both boards. Full detail, including the RJ45 crossover pinout, is
 in [docs/wiring.md](docs/wiring.md).
 
-| FPGA net | FPGA pin | Dir | Module header | ENC28J60 IC pin |
+Eight female-to-female 2.54 mm DuPont jumpers per node. Both headers present
+male pins, so F-F is the correct cable.
+
+| Wire | FPGA board | Which header | ENC28J60 | IC pin |
 |---|---|---|---|---|
-| `enc_sck`   | PIN_103 | → | `SCK`   | 8  |
-| `enc_mosi`  | PIN_104 | → | `SI`    | 7  |
-| `enc_miso`  | PIN_105 | ← | `SO`    | 6  |
-| `enc_cs_n`  | PIN_106 | → | `CS`    | 9  |
-| `enc_rst_n` | PIN_110 | → | `RESET` | 10 |
-| `enc_int`   | PIN_111 | ← | `INT`   | 4  |
-| 3.3 V | — | — | `VCC` | 28 |
-| GND | GND | — | `GND` | 2 |
+| `enc_sck`   | `105`  | right, row 1 left  | `SCK`  | 8  |
+| `enc_mosi`  | `106`  | right, row 1 right | `SI`   | 7  |
+| `enc_miso`  | `103`  | right, row 2 left  | `SO`   | 6  |
+| `enc_cs_n`  | `104`  | right, row 2 right | `CS`   | 9  |
+| `enc_rst_n` | `100`  | right, row 3 left  | `RST`  | 10 |
+| `enc_int`   | `98`   | right, row 4 left  | `INT`  | 4  |
+| VCC         | `3.3V` | **top**, right end | `VCC`  | 28 |
+| GND         | `GND`  | right, bottom      | `GND`  | 2  |
+
+The module's 2×5 header reads down as `CLK|INT`, `WOL|SO`, `SI|SCK`,
+`CS|RST`, `VCC|GND`. `CLK` and `WOL` stay empty.
 
 ### Before you power anything on
 
-Three things that are genuinely likely to bite, in rough order of probability:
-
-1. **The FPGA pin assignments above are unverified.** They were chosen from
-   free user I/O that other projects on this board drive, not read off a
-   header diagram. Check them against your board's silkscreen first.
-2. **The ENC28J60 needs its own 3.3 V regulator.** It draws up to ~180 mA
-   while transmitting, which is more than an FPGA board's 3.3 V pin should be
-   asked to supply. Tie grounds together and decouple with 100 nF + 10 µF at
-   the module.
-3. **Match the module header by label, not position.** ENC28J60 breakouts ship
-   with several different 2×5 header layouts between vendors.
+1. **Use the right-hand header only.** It is the board's fixed 3.3 V group,
+   I/O bank 6. The top (C group) and bottom (B group) headers are bank 7 and
+   run at whatever VC/VB is jumpered to — 3.3, 2.5, 1.8 or 1.2 V. The
+   ENC28J60 drives `SO` and `INT` at 3.3 V, so an input there with the jumper
+   set low is over-driven. Only the `3.3V` *power* pin is taken from the top
+   header, and that is a fixed rail.
+2. **`PIN_101` is skipped on purpose** — it is `nCEO`, which the FPGA drives
+   during configuration while the module drives `INT`. `INT` is on `PIN_98`.
+3. **Match the module header by printed label, not position.** ENC28J60
+   breakouts ship with several different 2×5 layouts between vendors; the
+   order above is from a HanRun HR911105A module.
+4. **Power the module from the board's `3.3V` pin,** and feed the board from a
+   real USB-C supply rather than a low-current laptop port. If the link drops
+   or the FPGA resets *specifically while transmitting*, that is rail sag —
+   move VCC to its own 3.3 V supply with grounds tied together.
 
 ### The cable must be a crossover
 

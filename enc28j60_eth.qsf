@@ -52,21 +52,41 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to led[3]
 set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to led[4]
 
 # ---------------------------------------------------------------------------
-# ENC28J60 MODULE -- >>> VERIFY THESE AGAINST YOUR BOARD'S HEADER SILKSCREEN
-# <<<
+# ENC28J60 MODULE -- all six signals on the RIGHT-HAND header.
 #
-# These are free user I/O on the expansion header (the same region the
-# TM1638 project drives at PIN_103/104/105). Nothing else in this project
-# uses them, so they are safe as a starting point -- but confirm the header
-# pinout before plugging in, and keep the harness under ~10 cm.
+# That header is the board's FIXED 3.3 V bank, which matters for two reasons:
+#
+#   1. The top (C group) and bottom (B group) headers run at whatever VC / VB
+#      is jumpered to -- 3.3, 2.5, 1.8 or 1.2 V. The ENC28J60 drives SO and INT
+#      at 3.3 V, so putting an input there while VC is set low over-drives the
+#      bank. An earlier revision of this file used PIN_110/111 from the C group
+#      for exactly that reason -- don't go back to it.
+#   2. No jumper cap needs configuring before the design will work.
+#
+# The right header is laid out in two columns, top to bottom:
+#
+#       105 | 106
+#       103 | 104
+#       100 | 101   <- 101 is ~ALTERA_nCEO~, SKIPPED (see below)
+#        98 |  99
+#        ...
+#       GND         (bottom of the same header -- use it for the ground wire)
+#
+# All of 98..106 are bank 6. PIN_110/111 are bank 7, the VC-jumpered bank.
+#
+# PIN_101 is deliberately unused: it is the nCEO configuration pin. Quartus can
+# release it with CYCLONEII_RESERVE_NCEO_AFTER_CONFIGURATION, but the FPGA
+# drives nCEO *during* configuration while the ENC28J60 drives INT, which is
+# output-against-output contention every time the board configures. INT lives
+# on PIN_98 instead.
 # ---------------------------------------------------------------------------
 
-set_location_assignment PIN_103 -to enc_sck
-set_location_assignment PIN_104 -to enc_mosi
-set_location_assignment PIN_105 -to enc_miso
-set_location_assignment PIN_106 -to enc_cs_n
-set_location_assignment PIN_110 -to enc_rst_n
-set_location_assignment PIN_111 -to enc_int
+set_location_assignment PIN_105 -to enc_sck
+set_location_assignment PIN_106 -to enc_mosi
+set_location_assignment PIN_103 -to enc_miso
+set_location_assignment PIN_104 -to enc_cs_n
+set_location_assignment PIN_100 -to enc_rst_n
+set_location_assignment PIN_98  -to enc_int
 
 set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to enc_sck
 set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to enc_mosi
