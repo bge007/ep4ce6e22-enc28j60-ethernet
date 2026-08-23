@@ -163,9 +163,14 @@ module tb_m2;
 
     initial begin
         #200 nrst = 1;
-        // M1 (2+10+10 ms resets) then M2 (microseconds of SPI at 12.5 MHz)
-        // then time for the UART banner+ETH line (24+23 bytes at 115200).
-        #40_000_000;
+
+        // Check right as M2 finishes, not after a fixed delay: M3 (net_stack)
+        // now starts running the instant eth_ready fires, and its own
+        // one-time init writes ECON1 again (bank 1, to poll EPKTCNT) shortly
+        // afterward. A fixed-time sample would risk catching net_stack's
+        // state instead of M2's -- sampling at the edge avoids that.
+        wait (dut.eth_ready);
+        #10;
 
         // ---- RX/TX buffer, bank 0 ----
         check_reg(2'd0, 5'h08, 8'h00, "ERXSTL");
@@ -206,6 +211,10 @@ module tb_m2;
         check(dut.eth_ready === 1'b1,  "eth_ready never asserted");
 
         // ---- the UART status line reports the same byte ----
+        // Give the banner + "ETH C1=xx" line time to actually transmit
+        // (roughly 2 ms of real UART bytes at 115200) -- unaffected by
+        // net_stack's later ECON1 writes, which is a separate signal path.
+        #3_000_000;
         check(contains("ETH C1=04", 9) >= 0, "UART did not report 'ETH C1=04'");
 
         // ---- M1 behaviour must still work: EREVID readback unaffected ----

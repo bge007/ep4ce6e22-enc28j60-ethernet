@@ -31,7 +31,15 @@
 module oled_sh1106 #(
     parameter integer CLK_HZ    = 50_000_000,
     parameter [6:0]   I2C_ADR   = 7'h3C,           // 0111100b; 0x3D if D/C# high
-    parameter integer POR_TICKS = 5_000_000        // 100 ms at 50 MHz
+    parameter integer POR_TICKS = 5_000_000,       // 100 ms at 50 MHz
+    // Diagnostic escape hatch: this panel's own datasheet contradicts itself
+    // (page 15's reference schematic says "SSD1306 / 0.96''", the mechanical
+    // drawing and section 4.1 both say SH1106), and SH1106/SSD1306 mislabelling
+    // is common in this exact market segment. Both chips ACK identically on
+    // the bus -- I2C success proves nothing about which one is really there.
+    // Set to 1 to try the SSD1306 init sequence instead: charge pump 0x8D/0x14
+    // rather than 0xAD/0x8B, no VPP command, and no +2 column offset.
+    parameter integer SSD1306_COMPAT = 0
 ) (
     input  wire       clk,
     input  wire       rst,
@@ -69,28 +77,49 @@ module oled_sh1106 #(
     assign i2c_err = i2c_ack_err;
 
     // ------------------------------------------------------------------
-    // Init sequence (datasheet 4.4, charge pump changed as noted above)
+    // Init sequence (datasheet 4.4, charge pump changed as noted above).
+    // SSD1306_COMPAT swaps in the SSD1306 equivalents -- see the parameter
+    // comment above for why this exists as a build-time switch.
     // ------------------------------------------------------------------
-    localparam integer INIT_N = 25;
+    localparam integer INIT_N = SSD1306_COMPAT ? 24 : 25;
     reg [7:0] initrom [0:INIT_N-1];
     initial begin
-        initrom[ 0] = 8'hAE;                        // display off
-        initrom[ 1] = 8'h02;                        // lower column = 2
-        initrom[ 2] = 8'h10;                        // higher column = 0
-        initrom[ 3] = 8'h40;                        // start line 0
-        initrom[ 4] = 8'hB0;                        // page 0
-        initrom[ 5] = 8'h81; initrom[ 6] = 8'hBF;   // contrast
-        initrom[ 7] = 8'hA1;                        // segment remap
-        initrom[ 8] = 8'hA6;                        // normal, not inverted
-        initrom[ 9] = 8'hA8; initrom[10] = 8'h3F;   // multiplex 1/64
-        initrom[11] = 8'hAD; initrom[12] = 8'h8B;   // charge pump: internal
-        initrom[13] = 8'h32;                        // VPP 8 V
-        initrom[14] = 8'hC8;                        // COM scan remapped
-        initrom[15] = 8'hD3; initrom[16] = 8'h00;   // display offset 0
-        initrom[17] = 8'hD5; initrom[18] = 8'h80;   // clock divide / osc
-        initrom[19] = 8'hD9; initrom[20] = 8'h22;   // pre-charge
-        initrom[21] = 8'hDA; initrom[22] = 8'h12;   // COM pins
-        initrom[23] = 8'hDB; initrom[24] = 8'h40;   // VCOMH
+        if (SSD1306_COMPAT) begin
+            initrom[ 0] = 8'hAE;                        // display off
+            initrom[ 1] = 8'h00;                        // lower column = 0 (no offset)
+            initrom[ 2] = 8'h10;                        // higher column = 0
+            initrom[ 3] = 8'h40;                        // start line 0
+            initrom[ 4] = 8'hB0;                        // page 0
+            initrom[ 5] = 8'h81; initrom[ 6] = 8'hBF;   // contrast
+            initrom[ 7] = 8'hA1;                        // segment remap
+            initrom[ 8] = 8'hA6;                        // normal, not inverted
+            initrom[ 9] = 8'hA8; initrom[10] = 8'h3F;   // multiplex 1/64
+            initrom[11] = 8'h8D; initrom[12] = 8'h14;   // charge pump: SSD1306 enable
+            initrom[13] = 8'hC8;                        // COM scan remapped
+            initrom[14] = 8'hD3; initrom[15] = 8'h00;   // display offset 0
+            initrom[16] = 8'hD5; initrom[17] = 8'h80;   // clock divide / osc
+            initrom[18] = 8'hD9; initrom[19] = 8'h22;   // pre-charge
+            initrom[20] = 8'hDA; initrom[21] = 8'h12;   // COM pins
+            initrom[22] = 8'hDB; initrom[23] = 8'h40;   // VCOMH
+        end else begin
+            initrom[ 0] = 8'hAE;                        // display off
+            initrom[ 1] = 8'h02;                        // lower column = 2
+            initrom[ 2] = 8'h10;                        // higher column = 0
+            initrom[ 3] = 8'h40;                        // start line 0
+            initrom[ 4] = 8'hB0;                        // page 0
+            initrom[ 5] = 8'h81; initrom[ 6] = 8'hBF;   // contrast
+            initrom[ 7] = 8'hA1;                        // segment remap
+            initrom[ 8] = 8'hA6;                        // normal, not inverted
+            initrom[ 9] = 8'hA8; initrom[10] = 8'h3F;   // multiplex 1/64
+            initrom[11] = 8'hAD; initrom[12] = 8'h8B;   // charge pump: internal
+            initrom[13] = 8'h32;                        // VPP 8 V
+            initrom[14] = 8'hC8;                        // COM scan remapped
+            initrom[15] = 8'hD3; initrom[16] = 8'h00;   // display offset 0
+            initrom[17] = 8'hD5; initrom[18] = 8'h80;   // clock divide / osc
+            initrom[19] = 8'hD9; initrom[20] = 8'h22;   // pre-charge
+            initrom[21] = 8'hDA; initrom[22] = 8'h12;   // COM pins
+            initrom[23] = 8'hDB; initrom[24] = 8'h40;   // VCOMH
+        end
     end
 
     localparam [7:0] CTL_CMD  = 8'h00;   // Co=0, D/C=0 -> command stream
@@ -167,8 +196,11 @@ module oled_sh1106 #(
     reg        turn_on;      // this init pass sends 0xAF rather than the table
     reg        clear_pass;   // paint blanks, not text
 
+    // SSD1306 has no +2 RAM offset, so its lower-column byte is 0x00.
+    localparam [7:0] LOWER_COL = SSD1306_COMPAT ? 8'h00 : 8'h02;
+
     wire [7:0] page_cmd = (cmd_i == 2'd0) ? (8'hB0 | {5'd0, page}) :
-                          (cmd_i == 2'd1) ? 8'h02 :     // lower col = 2
+                          (cmd_i == 2'd1) ? LOWER_COL :
                                             8'h10;      // higher col = 0
 
     task reset_walk;

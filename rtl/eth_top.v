@@ -48,25 +48,57 @@ module eth_top #(
     always @(posedge clk) rst_sync <= {rst_sync[0], ~nrst};
     wire rst = rst_sync[1];
 
+    // Declared here (rather than down in the M2 section that actually sets
+    // it) purely so the SPI mux and net_stack instantiation below can use it
+    // -- referencing a reg before its driving always block is fine in
+    // Verilog, but referencing one before ANY declaration at all, inside a
+    // module port connection, is what actually breaks (hit this once
+    // already with o_ready/oled_i2c_err_sticky further down).
+    reg        eth_ready;            // M2 complete (level, held)
+
     // ------------------------------------------------------------------
     // SPI master (12.5 MHz for bring-up; final design moves to 20 MHz)
     // ------------------------------------------------------------------
-    reg        spi_start;
-    reg  [7:0] spi_tx;
+    reg        m12_spi_start;
+    reg  [7:0] m12_spi_tx;
+    reg        m12_cs_n;
     wire [7:0] spi_rx;
     wire       spi_busy;
+
+    // M3 (net_stack) takes over the bus once M2 finishes; see the mux below
+    // and the S_HANDOFF note in the M1/M2 FSM further down. Only one of the
+    // two ever drives at a time, so this is a plain mux, not an arbiter.
+    wire        net_cs_n, net_spi_start;
+    wire [7:0]  net_spi_tx;
+    wire [15:0] eth_frames_seen, eth_arp_replies;
+
+    wire        mux_cs_n      = eth_ready ? net_cs_n      : m12_cs_n;
+    wire        mux_spi_start = eth_ready ? net_spi_start : m12_spi_start;
+    wire [7:0]  mux_spi_tx    = eth_ready ? net_spi_tx    : m12_spi_tx;
 
     spi_master #(.CLK_DIV(2)) u_spi (
         .clk    (clk),
         .rst    (rst),
-        .start  (spi_start),
-        .tx_byte(spi_tx),
+        .start  (mux_spi_start),
+        .tx_byte(mux_spi_tx),
         .rx_byte(spi_rx),
         .busy   (spi_busy),
         .sck    (enc_sck),
         .mosi   (enc_mosi),
         .miso   (enc_miso)
     );
+
+    net_stack #(
+        .OUR_MAC({40'h0242CE6000, HOST_ID}),
+        .OUR_IP ({24'hC0A801, 8'd59 + HOST_ID})
+    ) u_net (
+        .clk(clk), .rst(rst), .start(eth_ready),
+        .cs_n(net_cs_n), .spi_start(net_spi_start), .spi_tx(net_spi_tx),
+        .spi_rx(spi_rx), .spi_busy(spi_busy),
+        .frames_seen(eth_frames_seen), .arp_replies_sent(eth_arp_replies)
+    );
+
+    assign enc_cs_n = mux_cs_n;
 
     // ------------------------------------------------------------------
     // ENC28J60 opcodes / registers used here
@@ -210,10 +242,10 @@ module eth_top #(
     localparam S_M2_RDWAIT  = 4'd13;
     localparam S_M2_NEXT    = 4'd14;
     localparam S_M2_DONE    = 4'd15;
+    localparam S_HANDOFF    = 5'd16;   // M1/M2 FSM done forever; net_stack owns SPI now
 
-    reg [3:0]  state;
+    reg [4:0]  state;
     reg [22:0] wait_cnt;
-    reg        cs_n;
     reg        enc_rst_q;
     reg [7:0]  erevid;
     reg        spi_busy_d;
@@ -221,7 +253,6 @@ module eth_top #(
     reg        m2_started;          // guards the once-only M2 sequence
     reg [5:0]  m2_idx;               // index into cfg_op/cfg_dat, 0..CFG_N-1
     reg [7:0]  econ1_rb;             // the one register this sequence reads back
-    reg        eth_ready;            // M2 complete (level, held)
     wire       m2_is_read = (cfg_op[m2_idx][7:5] == 3'b000);
     // The only read left in this sequence is ECON1, an Ethernet-type/common
     // register that returns data immediately after the opcode -- no dummy
@@ -230,17 +261,16 @@ module eth_top #(
 
     wire spi_done = spi_busy_d & ~spi_busy;   // falling edge of busy
 
-    assign enc_cs_n  = cs_n;
     assign enc_rst_n = enc_rst_q;
 
     always @(posedge clk) begin
         spi_busy_d <= spi_busy;
-        spi_start  <= 1'b0;                   // default: single-cycle pulse
+        m12_spi_start  <= 1'b0;                   // default: single-cycle pulse
 
         if (rst) begin
             state      <= S_HW_RESET;
             wait_cnt   <= 23'd0;
-            cs_n       <= 1'b1;
+            m12_cs_n       <= 1'b1;
             enc_rst_q  <= 1'b0;
             erevid     <= 8'h00;
             m2_started <= 1'b0;
@@ -267,15 +297,15 @@ module eth_top #(
                         wait_cnt <= wait_cnt + 1'b1;
 
                 S_SRC: begin
-                    cs_n      <= 1'b0;
-                    spi_tx    <= OP_SRC;
-                    spi_start <= 1'b1;
+                    m12_cs_n      <= 1'b0;
+                    m12_spi_tx    <= OP_SRC;
+                    m12_spi_start <= 1'b1;
                     state     <= S_SRC_WAIT;
                 end
 
                 S_SRC_WAIT:
                     if (spi_done) begin
-                        cs_n     <= 1'b1;
+                        m12_cs_n     <= 1'b1;
                         wait_cnt <= 23'd0;
                         state    <= S_BANK_OP;   // S_BANK_OP waits 10 ms first
                     end
@@ -283,9 +313,9 @@ module eth_top #(
                 S_BANK_OP: begin
                     // wait out the post-SRC delay before first real command
                     if (wait_cnt == {3'b000, T_10MS}) begin
-                        cs_n      <= 1'b0;
-                        spi_tx    <= OP_WCR_ECON1;
-                        spi_start <= 1'b1;
+                        m12_cs_n      <= 1'b0;
+                        m12_spi_tx    <= OP_WCR_ECON1;
+                        m12_spi_start <= 1'b1;
                         state     <= S_BANK_DATA;
                     end else
                         wait_cnt <= wait_cnt + 1'b1;
@@ -293,29 +323,29 @@ module eth_top #(
 
                 S_BANK_DATA:
                     if (spi_done) begin
-                        if (cs_n == 1'b0 && spi_tx == OP_WCR_ECON1) begin
-                            spi_tx    <= BANK3;
-                            spi_start <= 1'b1;
+                        if (m12_cs_n == 1'b0 && m12_spi_tx == OP_WCR_ECON1) begin
+                            m12_spi_tx    <= BANK3;
+                            m12_spi_start <= 1'b1;
                         end else begin
-                            cs_n  <= 1'b1;
+                            m12_cs_n  <= 1'b1;
                             state <= S_RD_OP;
                         end
                     end
 
                 S_RD_OP: begin
-                    cs_n      <= 1'b0;
-                    spi_tx    <= OP_RCR_EREVID;
-                    spi_start <= 1'b1;
+                    m12_cs_n      <= 1'b0;
+                    m12_spi_tx    <= OP_RCR_EREVID;
+                    m12_spi_start <= 1'b1;
                     state     <= S_RD_DATA;
                 end
 
                 S_RD_DATA:
                     if (spi_done) begin
-                        if (spi_tx == OP_RCR_EREVID) begin
-                            spi_tx    <= 8'h00;       // clock in the data byte
-                            spi_start <= 1'b1;
+                        if (m12_spi_tx == OP_RCR_EREVID) begin
+                            m12_spi_tx    <= 8'h00;       // clock in the data byte
+                            m12_spi_start <= 1'b1;
                         end else begin
-                            cs_n  <= 1'b1;
+                            m12_cs_n  <= 1'b1;
                             state <= S_LATCH;
                         end
                     end
@@ -344,34 +374,34 @@ module eth_top #(
 
                 // ---- M2: walk cfg_op/cfg_dat, one SPI transaction each ----
                 S_M2_OP: begin
-                    cs_n      <= 1'b0;
-                    spi_tx    <= cfg_op[m2_idx];
-                    spi_start <= 1'b1;
+                    m12_cs_n      <= 1'b0;
+                    m12_spi_tx    <= cfg_op[m2_idx];
+                    m12_spi_start <= 1'b1;
                     state     <= S_M2_OPWAIT;
                 end
 
                 S_M2_OPWAIT:
                     if (spi_done) begin
                         if (m2_is_read) begin
-                            spi_tx    <= 8'h00;   // clocks in the reply directly
-                            spi_start <= 1'b1;
+                            m12_spi_tx    <= 8'h00;   // clocks in the reply directly
+                            m12_spi_start <= 1'b1;
                             state     <= S_M2_RDWAIT;
                         end else begin
-                            spi_tx    <= cfg_dat[m2_idx];
-                            spi_start <= 1'b1;
+                            m12_spi_tx    <= cfg_dat[m2_idx];
+                            m12_spi_start <= 1'b1;
                             state     <= S_M2_WRWAIT;
                         end
                     end
 
                 S_M2_WRWAIT:
                     if (spi_done) begin
-                        cs_n  <= 1'b1;
+                        m12_cs_n  <= 1'b1;
                         state <= S_M2_NEXT;
                     end
 
                 S_M2_RDWAIT:
                     if (spi_done) begin
-                        cs_n     <= 1'b1;
+                        m12_cs_n     <= 1'b1;
                         econ1_rb <= spi_rx;      // the only read in this sequence
                         state    <= S_M2_NEXT;
                     end
@@ -386,8 +416,14 @@ module eth_top #(
 
                 S_M2_DONE: begin
                     eth_ready <= 1'b1;
-                    state     <= S_IDLE;
+                    state     <= S_HANDOFF;
                 end
+
+                // Terminal: net_stack owns m12_cs_n/m12_spi_start/m12_spi_tx from here.
+                // erevid stays frozen at its last M1/M2 value; the LED and
+                // OLED continue showing that snapshot rather than polling
+                // forever, since polling would race net_stack for the bus.
+                S_HANDOFF: ;
 
                 default: state <= S_HW_RESET;
             endcase

@@ -60,11 +60,11 @@ if (-not $Prog) {
 
     vlog -sv ../rtl/spi_master.v ../rtl/i2c_master.v ../rtl/oled_sh1106.v `
              ../rtl/uart_tx.v ../rtl/uart_rx.v ../rtl/uart_console.v `
-             ../rtl/debounce.v ../rtl/eth_top.v `
-             ../tb/tb_m1.v ../tb/tb_m2.v ../tb/tb_oled.v ../tb/tb_uart.v
+             ../rtl/debounce.v ../rtl/net_stack.v ../rtl/eth_top.v `
+             ../tb/tb_m1.v ../tb/tb_m2.v ../tb/tb_m3.v ../tb/tb_oled.v ../tb/tb_uart.v
     if (-not $?) { throw "vlog failed" }
 
-    foreach ($tb in @("tb_m1", "tb_m2", "tb_oled", "tb_uart")) {
+    foreach ($tb in @("tb_m1", "tb_m2", "tb_m3", "tb_oled", "tb_uart")) {
         Write-Host "--- $tb ---" -ForegroundColor DarkCyan
         $out = (vsim -c -do "run -all; quit -f" $tb) -join "`n"
         Write-Host $out

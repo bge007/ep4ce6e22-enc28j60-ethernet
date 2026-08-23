@@ -21,6 +21,7 @@ set_global_assignment -name VERILOG_FILE rtl/uart_tx.v
 set_global_assignment -name VERILOG_FILE rtl/uart_rx.v
 set_global_assignment -name VERILOG_FILE rtl/uart_console.v
 set_global_assignment -name VERILOG_FILE rtl/debounce.v
+set_global_assignment -name VERILOG_FILE rtl/net_stack.v
 set_global_assignment -name SDC_FILE enc28j60_eth.sdc
 
 # Unused pins as inputs tri-stated -- the ENC28J60 module shares the header,
@@ -124,6 +125,16 @@ set_location_assignment PIN_86 -to oled_sda
 
 set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to oled_scl
 set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to oled_sda
+
+# Weak internal pull-ups, IN ADDITION to the module's own external 4.7k
+# resistors. Without these, a genuinely disconnected or unpowered I2C bus
+# floats on both lines, and a floating Cyclone IV input does not reliably
+# read high -- it can just as easily settle low, which the I2C master would
+# misread as a successful ACK. The weak pull-up guarantees a disconnected bus
+# idles high and is reported as a real NACK instead of a false ACK. It is
+# harmless when the module is connected: its own 4.7k dominates.
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to oled_scl
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to oled_sda
 
 # ---------------------------------------------------------------------------
 # UART to the onboard CH340 -> USB COM port, 115200 8N1.

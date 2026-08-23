@@ -129,9 +129,15 @@ module tb_m1;
 
         #200 nrst = 1;
 
-        // 2ms hw reset + 10ms wait + SRC + 10ms + transactions, at 50 MHz.
-        // Give it 30 ms of sim time.
-        #30_000_000;
+        // Check the instant EREVID first latches, not after a fixed delay.
+        // Since M3 (net_stack) now starts running the moment M2 completes,
+        // and this model's crude EPKTCNT response (0xAA, non-zero) tricks
+        // net_stack into thinking a packet is always waiting, ECON1 keeps
+        // changing indefinitely afterward -- a fixed-time sample would catch
+        // whatever net_stack happened to write most recently, not M1's own
+        // result. Sampling right at the M1 milestone avoids that entirely.
+        wait (dut.erevid == 8'h06);
+        #10;
 
         if (!model.got_hw_reset) begin
             $display("FAIL: model never saw hardware reset");
@@ -158,6 +164,12 @@ module tb_m1;
             $display("PASS: EREVID=0x%02h read correctly, LEDs correct", dut.erevid);
         else
             $display("%0d ERROR(S)", errors);
+        $finish;
+    end
+
+    initial begin
+        #100_000_000;
+        $display("FAIL: timeout -- dut.erevid never reached 0x06");
         $finish;
     end
 
