@@ -219,6 +219,7 @@ no separate simulator to install).
 .\build.ps1 -ProgOnly    # program SRAM from the existing .sof, skip simulate/compile
 .\build.ps1 -Flash       # compile + program the config flash (non-volatile -- boots on its own)
 .\build.ps1 -FlashOnly   # program the config flash from the existing .sof, skip simulate/compile
+.\build.ps1 -HostB       # target Host B (192.168.1.61, MAC ...:02) -- combine with any of the above
 ```
 
 `-Prog`/`-ProgOnly` write the FPGA's SRAM directly — fast, but the design is
@@ -231,6 +232,13 @@ afterward. Flashing takes longer (erase + write + verify a whole sector) and
 is a real write cycle on physical flash, so `-Prog` remains the right choice
 for day-to-day iteration; reach for `-Flash` only once a design is meant to
 stick.
+
+`-HostB` builds the *same* source through a second Quartus revision
+(`enc28j60_eth_hostb.qsf`, which only overrides `HOST_ID` and the output
+directory) rather than a second project, matching "build one source twice"
+above. Its own `.sof`/`.rbf` live in `output_files_hostb`, so building one
+host never clobbers the other's bitstream — e.g. `.\build.ps1 -HostB -Prog`
+compiles and programs Host B while Host A's last build sits untouched.
 
 Tool paths default to a stock `C:\altera_lite\25.1std` install. Override with
 `-QuartusBin` / `-QuestaBin` / `-LoaderExe`, or the `QUARTUS_BIN`,
