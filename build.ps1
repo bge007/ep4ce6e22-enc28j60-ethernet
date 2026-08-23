@@ -13,6 +13,15 @@
 #                           # no USB-Blaster/PC needed after this)
 #   .\build.ps1 -FlashOnly  # program the config flash from the existing
 #                           # .sof, no simulate/compile step
+#   .\build.ps1 -HostB      # target Host B (192.168.1.61, MAC ...:02) instead
+#                           # of Host A -- combine with any of the above, e.g.
+#                           # .\build.ps1 -HostB -Prog
+#
+# -HostB compiles the *same* RTL through a second Quartus revision
+# (enc28j60_eth_hostb.qsf, which only overrides HOST_ID and the output
+# directory) rather than a second project -- see plan.md. Its own .sof/.rbf
+# live in output_files_hostb so building one host never overwrites the
+# other's bitstream; program each board from its own build.
 #
 # Toolchain paths default to this project's dev machine layout: Quartus Prime
 # Lite 25.1 under C:\altera_lite, and openFPGALoader under C:\FPGA\tools.
@@ -38,6 +47,7 @@ param(
     [switch]$ProgOnly,
     [switch]$Flash,
     [switch]$FlashOnly,
+    [switch]$HostB,
     [string]$QuartusBin,
     [string]$QuestaBin,
     [string]$LoaderExe,
@@ -64,6 +74,12 @@ $FPGA_PART = Resolve-Tool $FpgaPart   "OFL_FPGA_PART" "ep4ce622"
 # needed for -Flash/-FlashOnly; a bare "cygpath not recognized" error with no
 # other symptom is this exact problem.
 $GIT_USR_BIN = "C:\Program Files\Git\usr\bin"
+
+# Quartus names generated files after the *revision*, not the project --
+# output_files\enc28j60_eth.sof for Host A, output_files_hostb\
+# enc28j60_eth_hostb.sof for Host B (its own qsf sets that output dir).
+$REVISION = if ($HostB) { "enc28j60_eth_hostb" } else { "enc28j60_eth" }
+$OUTDIR   = if ($HostB) { "output_files_hostb" } else { "output_files" }
 
 $onlyMode     = $ProgOnly -or $FlashOnly   # program from the existing .sof, no compile
 $willFlash    = $Flash -or $FlashOnly
@@ -100,22 +116,23 @@ Set-Location $root
 # spiOverJtag bridge, which openFPGALoader finds via OPENFPGALOADER_SOJ_DIR
 # and --fpga-part. Verified on hardware 2026-08-23.
 function Program-Board([switch]$ToFlash) {
-    $sof = "output_files\enc28j60_eth.sof"
+    $sof = "$OUTDIR\$REVISION.sof"
+    $rbf = "$OUTDIR\$REVISION.rbf"
     if (-not (Test-Path $sof)) {
         throw "$sof not found -- run a normal build first (.\build.ps1 or .\build.ps1 -Prog)."
     }
     $env:PATH = "$QUARTUS;$env:PATH"
-    quartus_cpf -c $sof output_files\enc28j60_eth.rbf
+    quartus_cpf -c $sof $rbf
     if (-not $?) { throw "sof -> rbf conversion failed" }
 
     if ($ToFlash) {
         Write-Host "=== Programming config flash (non-volatile) ===" -ForegroundColor Cyan
         if (Test-Path $GIT_USR_BIN) { $env:PATH = "$GIT_USR_BIN;$env:PATH" }
         $env:OPENFPGALOADER_SOJ_DIR = $SOJ_DIR
-        & $LOADER -c usb-blaster -f --fpga-part $FPGA_PART output_files\enc28j60_eth.rbf
+        & $LOADER -c usb-blaster -f --fpga-part $FPGA_PART $rbf
     } else {
         Write-Host "=== Programming board (SRAM, volatile) ===" -ForegroundColor Cyan
-        & $LOADER -c usb-blaster output_files\enc28j60_eth.rbf
+        & $LOADER -c usb-blaster $rbf
     }
     if (-not $?) { throw "Programming failed -- check WinUSB driver via zadig" }
 }
@@ -156,14 +173,15 @@ if ($willSimulate) {
 }
 
 # ---- synthesise --------------------------------------------------------
-Write-Host "=== Compiling (Quartus) ===" -ForegroundColor Cyan
+Write-Host "=== Compiling (Quartus) -- $REVISION ===" -ForegroundColor Cyan
 $env:PATH = "$QUARTUS;$env:PATH"
-# Quartus resolves $readmemh relative to the project root, not rtl/.
+# Quartus resolves $readmemh relative to the project root, not rtl/, for
+# every revision alike.
 Copy-Item rtl\font5x8.mem . -Force
-quartus_sh --flow compile enc28j60_eth
-if (-not $?) { throw "Quartus compile failed -- see output_files\*.rpt" }
+quartus_sh --flow compile enc28j60_eth -c $REVISION
+if (-not $?) { throw "Quartus compile failed -- see $OUTDIR\*.rpt" }
 
-Select-String -Path output_files\enc28j60_eth.fit.rpt `
+Select-String -Path "$OUTDIR\$REVISION.fit.rpt" `
     -Pattern "Total logic elements|Total registers|Total pins" |
     ForEach-Object { $_.Line.Trim() }
 
