@@ -3,8 +3,8 @@
 ## Goal
 
 Demonstrate real network communication between two EP4CE6E22 boards, each
-driving a Microchip ENC28J60 10 Mbps Ethernet controller over SPI, joined by a
-single LAN cable — and push it to the practical limit of 10Base-T.
+driving a Microchip ENC28J60 10 Mbps Ethernet controller over SPI, joined
+through a 10/100 switch — and push it to the practical limit of 10Base-T.
 
 The ENC28J60 integrates the 10Base-T MAC and PHY. The FPGA supplies everything
 above it: the SPI master, the controller driver, and the protocol stack.
@@ -36,19 +36,27 @@ back-to-back.
 
 ## Duplex
 
-The ENC28J60 cannot auto-negotiate. A switch will always see it as 10 Mbit/s
-half duplex.
+The ENC28J60 has neither Auto-MDIX nor duplex auto-negotiation — it is a fixed
+10 Mbit/s half-duplex PHY however it is cabled. **This project runs the two
+boards through a 10/100 switch on ordinary patch cables**, which the switch's
+own auto-negotiated ports see as half duplex, so `MACON3.FULDPX` stays clear
+on both boards to match.
 
-- **Through a switch:** half duplex. One-directional streaming still reaches
-  ~9.5 Mbit/s.
-- **Two boards on a direct crossover cable:** no negotiating partner to
-  disagree with, so full duplex can be forced — `PHCON1.PDPXMD` +
-  `MACON3.FULDPX` on **both** boards, giving ~9.5 Mbit/s each way at once.
-  Setting it on one side only produces a duplex mismatch: late collisions and
-  throughput that collapses under load.
+This is not a compromise against the stated target. The throughput budget
+above and the M5 exit test are both **one-directional** — Host A streaming to
+Host B — and half duplex delivers the full ~9.57 Mbit/s there, since with only
+one side transmitting there are no collisions to lose time to.
 
-See [wiring.md](wiring.md) for the cable details — the crossover requirement is
-the most likely bring-up failure in this topology.
+If a direct crossover cable is available instead of a switch, full duplex can
+be forced — `PHCON1.PDPXMD` + `MACON3.FULDPX` on **both** boards, giving
+~9.5 Mbit/s each way at once — but this is an optional upgrade over the
+switch-based setup, not something the switch is missing. Setting it on one
+side only, or with a switch in the path, produces a duplex mismatch: late
+collisions and throughput that collapses under load.
+
+See [wiring.md](wiring.md) for the cabling and why a straight-through cable
+with no switch does not link up at all — the ENC28J60's missing Auto-MDIX
+means that combination wires transmitter to transmitter on both ends.
 
 ## Architecture
 
@@ -68,7 +76,7 @@ ENC28J60  MAC + PHY + 8 KB buffer
         |
      10Base-T, RJ45 + magnetics
         |
-   crossover cable -> second identical node
+   patch cable -> 10/100 switch -> patch cable -> second identical node
 ```
 
 ### Module budget

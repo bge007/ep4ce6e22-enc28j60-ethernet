@@ -1,9 +1,10 @@
 # Two-node wiring: Host A ⇄ Host B
 
 Two identical nodes — each an EP4CE6E22 board, an ENC28J60 Ethernet module and
-a 1.3" OLED — joined by one LAN cable.
+a 1.3" OLED — joined through a **10/100 switch** with two ordinary patch
+cables.
 
-![Wiring diagram for both nodes. Each EP4CE6E22 board's right-hand header connects by twelve colour-coded female-to-female DuPont jumpers to an ENC28J60 module's 2x5 header and a 1.3 inch OLED, and the two RJ45 jacks are joined by one crossover cable.](wiring-diagram.svg)
+![Wiring diagram for both nodes. Each EP4CE6E22 board's right-hand header connects by twelve colour-coded female-to-female DuPont jumpers to an ENC28J60 module's 2x5 header and a 1.3 inch OLED. Both RJ45 jacks connect to a small 10/100 switch with ordinary straight-through patch cables.](wiring-diagram.svg)
 
 Twelve jumpers per node, twenty-four in total. Wires cross in the drawing —
 follow the colour, not the path. The dashed purple `INT` line is optional;
@@ -11,22 +12,40 @@ milestone 1 polls `EPKTCNT` over SPI instead. The dashed red and grey lines are
 the 3.3 V and GND rails, shared between the two modules. `PIN_101` is marked ✗
 because it is the `nCEO` configuration pin; see below.
 
-## The cable must be a crossover
+## Why a switch, not a direct cable
 
-The ENC28J60 has **no Auto-MDIX**, and with no switch in this topology there is
-nothing to do the crossing for you. A straight-through patch cable wires
-transmitter to transmitter and the link LED never comes on.
+The ENC28J60 has **no Auto-MDIX and no manual MDI/MDI-X swap**. Its PHY
+register set (`PHCON1`, `PHCON2`, `PHSTAT1/2`, `PHLCON`, ...) covers duplex,
+loopback, power-save and LED configuration — nothing touches which pair is
+transmit and which is receive. That crossing has to happen somewhere between
+the two RJ45 jacks, and there is nothing in this design's logic, nor in the
+chip's, that can do it. It is fixed by the cabling.
 
-Use a crossover cable (T568A crimped on one end, T568B on the other), or drop
-any 10/100 switch between the two boards and use two ordinary patch cables.
+Two ways to get the crossing done:
 
-| Host A RJ45 | | Host B RJ45 |
+- **A crossover cable** direct between the two boards (T568A on one end,
+  T568B on the other) — no switch needed, and it also unlocks forced full
+  duplex (see below). Fine if you have one, or a crimp tool to make one.
+- **A 10/100 switch** with two ordinary straight-through patch cables — the
+  switch's own ports do the crossing internally. **This is the path this
+  project actually uses**, because crossover cables have become hard to buy
+  and any switch, or a router's built-in LAN ports, does the job. This
+  includes plain unmanaged 5-port switches, not just "smart" ones.
+
+A straight-through cable with **no** switch in between wires transmitter to
+transmitter on both ends, and the link LED never comes on. That is the one
+combination that does not work.
+
+| Host A RJ45 | → switch → | Host B RJ45 |
 |---|---|---|
-| 1 TX+ | → | 3 RX+ |
-| 2 TX− | → | 6 RX− |
-| 3 RX+ | ← | 1 TX+ |
-| 6 RX− | ← | 2 TX− |
+| 1,2 (TX) | patch cable, port 1 | switch crosses internally |
+| 3,6 (RX) | patch cable, port 1 | switch crosses internally |
+| — | patch cable, port 2 | 1,2 (TX) |
+| — | patch cable, port 2 | 3,6 (RX) |
 | 4, 5, 7, 8 | — | unused at 10Base-T |
+
+Both patch cables are ordinary straight-through — nothing to crimp, nothing to
+verify pin-by-pin.
 
 ## Per-board connections (identical on both hosts)
 
@@ -173,16 +192,28 @@ module eth_top #(
 ) ( ... );
 ```
 
-## This topology unlocks full duplex
+## Duplex: this topology runs half duplex, and that is fine
 
-The ENC28J60 cannot auto-negotiate, which is why a switch always falls back to
-10 Mbit/s half duplex. Two ENC28J60s on a direct crossover cable have no
-negotiating partner to disagree with: set `PHCON1.PDPXMD` and `MACON3.FULDPX`
-on **both** boards and the link runs full duplex, ~9.5 Mbit/s each way
-simultaneously.
+The ENC28J60 cannot auto-negotiate at all — no Auto-MDIX, and no duplex
+negotiation either. Through a switch it is always seen as **10 Mbit/s half
+duplex**, and `MACON3.FULDPX` must stay clear on both boards to match. Setting
+it on one or both sides while a switch is in the path creates a duplex
+mismatch with the switch's own auto-negotiated half-duplex port — late
+collisions, and throughput that collapses under load rather than failing
+cleanly.
 
-Set it on only one side and you get a duplex mismatch — late collisions and
-throughput that collapses under load. Both or neither.
+This costs nothing against the project's actual target. The ~9.57 Mbit/s
+figure in [plan.md](plan.md) and the M5 exit test are both **one-directional**
+— Host A streaming to Host B, nothing coming back except ACKs at the
+application layer. Half duplex delivers that in full: with only one side
+transmitting at a time, there are no collisions to lose time to. What half
+duplex gives up is the *bonus* of ~9.5 Mbit/s simultaneously in both
+directions, which was never the milestone target.
+
+If you later swap the switch for a direct crossover cable between the two
+boards, full duplex becomes available — see the note in
+[plan.md](plan.md#duplex) — but it is an optional upgrade, not something this
+topology is missing.
 
 ## Bring-up order
 
@@ -198,11 +229,12 @@ throughput that collapses under load. Both or neither.
 5. **Test each board alone.** Confirm `EREVID` = `0x06` with no cable
    attached. A board that cannot reach its own controller over SPI will not be
    fixed by plugging in Ethernet.
-6. **Then the crossover cable.** Link LEDs on both modules should light within
-   a second. Exactly one lit → suspect the cable. Neither lit → suspect PHY
-   init.
+6. **Then the switch.** Plug both boards into the switch with ordinary patch
+   cables. Link LEDs on both modules, and on the corresponding switch ports,
+   should light within a second. Exactly one lit → suspect that cable or
+   port. Neither lit → suspect PHY init.
 7. **Then ARP.** Host A ARPs for Host B's IP. A reply proves the whole path in
-   both directions: SPI out, transmit, cable, receive, SPI in.
+   both directions: SPI out, transmit, switch, receive, SPI in.
 8. **Then throughput.** Host A streams 1,472-byte sequence-numbered UDP
    datagrams; Host B counts bytes and gaps.
 

@@ -1,8 +1,9 @@
 # EP4CE6E22 + ENC28J60 — a hardware Ethernet stack in Verilog
 
 Two **EP4CE6E22C8** Cyclone IV E boards, each driving a Microchip **ENC28J60**
-10 Mbps Ethernet controller over SPI, joined by a single LAN cable — with the
-ARP / ICMP / UDP stack built as pure HDL rather than firmware on a soft CPU.
+10 Mbps Ethernet controller over SPI, joined through a **10/100 switch** with
+ordinary patch cables — with the ARP / ICMP / UDP stack built as pure HDL
+rather than firmware on a soft CPU.
 
 The target is the practical ceiling of 10Base-T: **~9.57 Mbit/s** of UDP
 payload, which is what 1,472-byte datagrams work out to once framing overhead
@@ -101,19 +102,26 @@ figures in USD to give a sense of scale — they are not quotes and they drift.
 
 | # | Item | Qty | Spec that matters | ~$ |
 |---|---|---|---|---|
-| 7 | **Crossover** Cat5e patch cable | 1 | see the warning below — this is the item people get wrong | 3–6 |
-| 8 | Female-to-female DuPont jumpers, 2.54 mm | 24 used | buy a 40-way ribbon. **10 cm if you can find it**, 20 cm at the outside — see harness length below | 2–4 |
-| 9 | USB-Blaster JTAG programmer | 1 | 10-pin ribbon included; one programmer flashes both boards in turn | 5–10 |
-| 10 | USB power source | 1 | a powered hub or mains adapter, ≥1 A per board. A low-current laptop port is the usual cause of flaky behaviour | 5–12 |
+| 7 | **10/100 switch**, any unmanaged 5-port | 1 | does the MDI/MDI-X crossing the ENC28J60 cannot do itself — see the warning below | 5–10 |
+| 8 | Cat5e patch cables, **straight-through** | 2 | ordinary cables, nothing to crimp or verify — one board to each switch port | 2–4 |
+| 9 | Female-to-female DuPont jumpers, 2.54 mm | 24 used | buy a 40-way ribbon. **10 cm if you can find it**, 20 cm at the outside — see harness length below | 2–4 |
+| 10 | USB-Blaster JTAG programmer | 1 | 10-pin ribbon included; one programmer flashes both boards in turn | 5–10 |
+| 11 | USB power source | 1 | a powered hub or mains adapter, ≥1 A per board. A low-current laptop port is the usual cause of flaky behaviour | 5–12 |
 
-Rough total for a complete two-node build: **$60–110**.
+Rough total for a complete two-node build: **$65–115**.
+
+> Already have a crossover cable, or a crimp tool to make one? Skip the switch
+> and cable it direct between the two boards instead — same $ either way,
+> roughly, and it additionally unlocks forced full duplex (see
+> [docs/plan.md](docs/plan.md#duplex)). Neither is required over the other;
+> the switch is simply what is easiest to find right now.
 
 ### Only if you hit rail sag
 
 | # | Item | Qty | When you need it | ~$ |
 |---|---|---|---|---|
-| 11 | AMS1117-3.3 regulator module, or a bench supply | 2 | Only if the link drops or the FPGA resets *specifically while transmitting*. See [Before you power anything on](#before-you-power-anything-on) | 1–3 |
-| 12 | Multimeter | 1 | **Not really optional.** Confirming 3.3 V at both modules — and that the OLED's I²C lines idle at 3.3 V, not 5 V — before connecting signal wires | — |
+| 12 | AMS1117-3.3 regulator module, or a bench supply | 2 | Only if the link drops or the FPGA resets *specifically while transmitting*. See [Before you power anything on](#before-you-power-anything-on) | 1–3 |
+| 13 | Multimeter | 1 | **Not really optional.** Confirming 3.3 V at both modules — and that the OLED's I²C lines idle at 3.3 V, not 5 V — before connecting signal wires | — |
 
 ### Software — all free
 
@@ -126,13 +134,16 @@ Rough total for a complete two-node build: **$60–110**.
 
 ### Five purchasing traps
 
-1. **The Ethernet cable must be a crossover.** The ENC28J60 has no Auto-MDIX
-   and there is no switch in this topology, so a straight-through patch cable
-   wires transmitter to transmitter and the link LED never lights. Crossover
-   cables are increasingly hard to buy — the easy substitute is **any cheap
-   10/100 switch plus two ordinary patch cables**, which costs about the same
-   and does the crossing internally. You lose the ability to force full
-   duplex, dropping the link to ~9.5 Mbit/s one-way instead of each-way.
+1. **Do not connect the two boards with a plain patch cable and no switch.**
+   The ENC28J60 has no Auto-MDIX and no manual MDI/MDI-X swap, so a
+   straight-through cable direct between two boards wires transmitter to
+   transmitter on both ends and the link LED never lights. This project uses
+   **any cheap 10/100 switch with two ordinary patch cables** — the switch's
+   ports do the crossing internally, and it is easier to find than a crossover
+   cable. A direct crossover cable also works if you have one, and additionally
+   unlocks forced full duplex, but it is not required — the switch path is
+   what this repo is built and documented against. See
+   [docs/wiring.md](docs/wiring.md).
 2. **Female-to-female jumpers, not male-to-female.** Both the FPGA board
    headers and the module's 2×5 header present *male* pins. Male-to-female
    ribbons are the more common purchase and will not connect these two boards.
@@ -158,8 +169,9 @@ the node at a PC instead of a second board. Milestones 1 through 4 — SPI
 readback, link up, ping, and UDP echo — all run fine against a PC's NIC, and
 you get Wireshark on the other end, which is a genuinely better debugging
 position than two silent FPGAs. You need a second board only for the two-node
-demo itself, and note that a PC link still needs the crossover cable (or a
-switch), because the ENC28J60's lack of Auto-MDIX is unchanged.
+demo itself. A PC link needs no switch: almost every PC NIC made in the last
+twenty years has Auto-MDIX and detects and swaps automatically, so a plain
+straight-through cable to a PC just works.
 
 ## Repository layout
 
@@ -181,7 +193,7 @@ switch), because the ENC28J60's lack of Auto-MDIX is unchanged.
 | [`docs/serial-console.md`](docs/serial-console.md) | UART pins, buttons, PowerShell usage |
 | [`tools/`](tools/) | Generators for the font and the wiring diagram |
 | [`docs/plan.md`](docs/plan.md) | Design rationale, throughput budget, milestones, errata list |
-| [`docs/wiring.md`](docs/wiring.md) | Pin-by-pin wiring for both nodes, board photos, the crossover cable |
+| [`docs/wiring.md`](docs/wiring.md) | Pin-by-pin wiring for both nodes, board photos, the switch topology |
 | [`docs/wiring-diagram.svg`](docs/wiring-diagram.svg) | The colour-coded jumper diagram, as a standalone SVG |
 | [`docs/bringup.md`](docs/bringup.md) | How to read the LEDs, what each failure mode looks like |
 | [`build.ps1`](build.ps1) | Simulate, compile, and program in one command |
@@ -209,10 +221,10 @@ in the companion repo.
 
 ## Wiring
 
-Identical on both boards. Full detail, including the RJ45 crossover pinout, is
-in [docs/wiring.md](docs/wiring.md).
+Identical on both boards. Full detail, including why a switch is used instead
+of a crossover cable, is in [docs/wiring.md](docs/wiring.md).
 
-![Wiring diagram for both nodes. Each EP4CE6E22 board's right-hand header connects by twelve colour-coded female-to-female DuPont jumpers to an ENC28J60 module's 2x5 header and a 1.3 inch OLED, and the two RJ45 jacks are joined by one crossover cable.](docs/wiring-diagram.svg)
+![Wiring diagram for both nodes. Each EP4CE6E22 board's right-hand header connects by twelve colour-coded female-to-female DuPont jumpers to an ENC28J60 module's 2x5 header and a 1.3 inch OLED. Both RJ45 jacks connect to a small 10/100 switch with ordinary straight-through patch cables.](docs/wiring-diagram.svg)
 
 Twelve female-to-female 2.54 mm DuPont jumpers per node — eight to the
 ENC28J60, four to the OLED. Every header involved presents male pins, so F-F is
@@ -253,21 +265,31 @@ and GND rails — see [docs/wiring.md](docs/wiring.md).
    or the FPGA resets *specifically while transmitting*, that is rail sag —
    move VCC to its own 3.3 V supply with grounds tied together.
 
-### The cable must be a crossover
+### Connect the two boards through a switch, not a direct cable
 
-The ENC28J60 has **no Auto-MDIX**, and in a two-board topology there is no
-switch to do the crossing for you. A straight-through patch cable wires
-transmitter to transmitter and the link LED never comes on.
+The ENC28J60 has **no Auto-MDIX and no manual MDI/MDI-X swap** — nothing in
+its PHY registers can do that crossing, and neither can this project's logic,
+since the crossing happens on wires the FPGA never touches. A straight-through
+patch cable direct between the two boards wires transmitter to transmitter on
+both ends and the link LED never comes on.
 
-Use a crossover cable — T568A crimped on one end, T568B on the other, which
-swaps pins 1↔3 and 2↔6 — or put any 10/100 switch between the boards and use
-two ordinary patch cables.
+This project uses **any cheap 10/100 switch** — including a router's built-in
+LAN ports — **with two ordinary straight-through patch cables**; the switch's
+ports do the crossing internally. A direct crossover cable (T568A crimped on
+one end, T568B on the other, swapping pins 1↔3 and 2↔6) also works if you have
+one, but a switch is what this repo is built and documented against, since
+crossover cables have become hard to buy.
 
-The upside of the direct connection: with no switch there is no
-auto-negotiation partner to disagree with, so **full duplex can be forced**.
-Set `PHCON1.PDPXMD` and `MACON3.FULDPX` on *both* boards for ~9.5 Mbit/s in
-each direction at once. Set it on one side only and you get a duplex mismatch:
-late collisions and throughput that collapses under load. Both or neither.
+This runs **half duplex**, which the switch's own auto-negotiated ports also
+expect — `MACON3.FULDPX` stays clear on both boards. That is not a loss
+against this project's target: the ~9.57 Mbit/s figure and the M5 exit test
+are both one-directional, and half duplex delivers that in full since only one
+side is transmitting at a time. Full duplex — forcing `PHCON1.PDPXMD` +
+`MACON3.FULDPX` on *both* boards for ~9.5 Mbit/s each way at once — is only
+available on a direct crossover cable with no switch in the path, and is an
+optional upgrade, not something the switch is missing. Setting it on one side
+only, or with a switch present, produces a duplex mismatch: late collisions
+and throughput that collapses under load.
 
 ## Roadmap
 
