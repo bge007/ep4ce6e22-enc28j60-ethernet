@@ -68,9 +68,20 @@ module net_stack #(
     localparam [4:0] A_EPKTCNT = 5'h19;                    // bank 1
 
     localparam [15:0] ERXST = 16'h0000, ERXND = 16'h19FF, ETXST = 16'h1A00;
-    // Control byte (1) + 42-byte ARP reply = 43 bytes; ETXND is inclusive of
-    // the last byte written, so ETXST + 43 - 1.
-    localparam [15:0] ARP_ETXND = ETXST + 16'd42;
+    // The ARP reply itself is only 42 bytes (14-byte dest/src/EtherType
+    // header + 28-byte ARP body), well under Ethernet's 60-byte minimum
+    // frame size (excluding FCS). MACON3's PADCFG bits were meant to pad
+    // this in hardware, but that write was never independently verifiable
+    // (the abandoned MAC-register readback -- see the cfg_op comment in
+    // eth_top.v) and real-hardware evidence points at it not having taken
+    // effect: EIR/ESTAT confirm the ENC28J60 completes the transmission
+    // cleanly, yet the frame never reaches anything downstream -- exactly
+    // what every compliant switch does with a runt frame, silently. Padding
+    // explicitly here removes the dependency on that unverified register.
+    localparam integer TX_LEN = 60;      // Ethernet minimum, header+payload
+    // Control byte (1) + TX_LEN bytes; ETXND is inclusive of the last byte
+    // written, so ETXST + (1 + TX_LEN) - 1.
+    localparam [15:0] ARP_ETXND = ETXST + TX_LEN[15:0];
 
     // ------------------------------------------------------------------
     // Bit-banged SPI transaction primitives, matching eth_top's M1/M2 style.
@@ -179,7 +190,9 @@ module net_stack #(
                 6'd38: arp_reply_byte = sender_ip[31:24];
                 6'd39: arp_reply_byte = sender_ip[23:16];
                 6'd40: arp_reply_byte = sender_ip[15:8];
-                default: arp_reply_byte = sender_ip[7:0];   // 41
+                6'd41: arp_reply_byte = sender_ip[7:0];
+                // Padding up to TX_LEN (60), see the ARP_ETXND comment above.
+                default: arp_reply_byte = 8'h00;
             endcase
         end
     endfunction
@@ -387,8 +400,10 @@ module net_stack #(
                     if (spi_done) state <= S_WBM_BOD_GO;
 
                 // Byte 0 of the write is the per-packet control byte (0x00:
-                // defer padding/CRC to MACON3, which M2 already configured
-                // to add both). Bytes 1..42 are the 42-byte ARP reply.
+                // defer CRC to MACON3.TXCRCEN). Bytes 1..TX_LEN are the
+                // 42-byte ARP reply followed by explicit zero padding up to
+                // TX_LEN -- see the ARP_ETXND comment above for why this
+                // isn't left to MACON3.PADCFG.
                 S_WBM_BOD_GO: begin
                     spi_tx    <= (txpos == 6'd0) ? 8'h00 : arp_reply_byte(txpos - 6'd1);
                     spi_start <= 1'b1;
@@ -396,7 +411,7 @@ module net_stack #(
                 end
                 S_WBM_BOD_WT:
                     if (spi_done) begin
-                        if (txpos == 6'd42) begin
+                        if (txpos == TX_LEN[5:0]) begin
                             cs_n  <= 1'b1;
                             state <= S_SETETXND0;
                         end else begin

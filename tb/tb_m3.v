@@ -10,8 +10,9 @@
 // model one packet is waiting, let net_stack process it, then check:
 //   * the reply written to the TX buffer is a byte-correct ARP reply
 //     (control byte, then 42 bytes: dest/src MAC swapped, OPER=2, SHA/SPA
-//     set to ours, THA/TPA mirroring the request's SHA/SPA)
-//   * ETXND was set correctly (43 bytes, inclusive end)
+//     set to ours, THA/TPA mirroring the request's SHA/SPA), zero-padded
+//     out to Ethernet's 60-byte minimum frame size
+//   * ETXND was set correctly (61 bytes, inclusive end)
 //   * ECON1.TXRTS was pulsed
 //   * ERXRDPT was advanced to the packet's own "next packet pointer" - 1
 //   * EPKTCNT was decremented (PKTDEC bit seen on ECON2)
@@ -247,9 +248,20 @@ module tb_m3;
         check(model.buf_mem[16'h1A27] == SENDER_IP[31:24],  "reply TPA[0] wrong");
         check(model.buf_mem[16'h1A2A] == SENDER_IP[7:0],    "reply TPA[3] wrong");
 
-        // ---- ETXND = ETXST + 42 = 0x1A2A ----
-        check(model.regs[0][5'h06] == 8'h2A && model.regs[0][5'h07] == 8'h1A,
-              "ETXND not set to 0x1A2A");
+        // ---- explicit zero padding, byte 43 (0x1A2B) through byte 60
+        // (0x1A3C), up to Ethernet's 60-byte minimum frame size ----
+        begin : pad_check
+            integer p;
+            for (p = 16'h1A2B; p <= 16'h1A3C; p = p + 1)
+                if (model.buf_mem[p] !== 8'h00) begin
+                    $display("FAIL: pad byte at 0x%04h is 0x%02h, expected 0x00", p, model.buf_mem[p]);
+                    errors = errors + 1;
+                end
+        end
+
+        // ---- ETXND = ETXST + 60 = 0x1A3C ----
+        check(model.regs[0][5'h06] == 8'h3C && model.regs[0][5'h07] == 8'h1A,
+              "ETXND not set to 0x1A3C");
 
         check(model.txrts_seen, "ECON1.TXRTS was never pulsed");
 
