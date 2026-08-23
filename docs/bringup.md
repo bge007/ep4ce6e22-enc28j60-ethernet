@@ -107,4 +107,4 @@ The full stack is budgeted at ~2,500 LE, so this leaves ample room.
 - Every project needs an SDC declaring the 50 MHz clock or the Timing
   Analyzer reports failure purely for lack of a clock definition.
 - Programming goes through openFPGALoader + WinUSB at
-  `C:\BGE\AI\FPGA\tools`, not Quartus's own jtagd.
+  `C:\FPGA\tools`, not Quartus's own jtagd.
