@@ -3,6 +3,10 @@
 #   .\build.ps1            # simulate + compile
 #   .\build.ps1 -Sim       # simulate only
 #   .\build.ps1 -Prog      # compile + program the board over USB-Blaster
+#   .\build.ps1 -ProgOnly  # program the board from the existing .sof, no
+#                          # simulate/compile step -- use after a compile
+#                          # already succeeded and only the board changed
+#                          # (different board plugged in, board power-cycled).
 #
 # Toolchain paths default to this project's dev machine layout: Quartus Prime
 # Lite 25.1 under C:\altera_lite, and openFPGALoader under C:\FPGA\tools.
@@ -15,6 +19,7 @@
 param(
     [switch]$Sim,
     [switch]$Prog,
+    [switch]$ProgOnly,
     [string]$QuartusBin,
     [string]$QuestaBin,
     [string]$LoaderExe
@@ -33,7 +38,10 @@ $QUARTUS = Resolve-Tool $QuartusBin "QUARTUS_BIN" "C:\altera_lite\25.1std\quartu
 $QUESTA  = Resolve-Tool $QuestaBin  "QUESTA_BIN"  "C:\altera_lite\25.1std\questa_fse\win64"
 $LOADER  = Resolve-Tool $LoaderExe  "OFL_EXE"     "C:\FPGA\tools\openFPGALoader\openFPGALoader.exe"
 
-foreach ($t in @(@{p=$QUARTUS;n="Quartus bin64"}, @{p=$QUESTA;n="Questa win64"})) {
+# -ProgOnly never simulates or compiles, so Questa isn't needed for it.
+$toolChecks = @(@{p=$QUARTUS;n="Quartus bin64"})
+if (-not $ProgOnly) { $toolChecks += @{p=$QUESTA;n="Questa win64"} }
+foreach ($t in $toolChecks) {
     if (-not (Test-Path $t.p)) {
         throw "$($t.n) not found at '$($t.p)'. Pass -QuartusBin/-QuestaBin or set QUARTUS_BIN/QUESTA_BIN."
     }
@@ -41,12 +49,30 @@ foreach ($t in @(@{p=$QUARTUS;n="Quartus bin64"}, @{p=$QUESTA;n="Questa win64"})
 
 # Only checked when actually programming: a full path can be validated up
 # front, unlike a bare "openFPGALoader.exe" which depends on PATH at call time.
-if ($Prog -and -not (Test-Path $LOADER)) {
+if (($Prog -or $ProgOnly) -and -not (Test-Path $LOADER)) {
     throw "openFPGALoader not found at '$LOADER'. Pass -LoaderExe or set OFL_EXE."
 }
 
 $root = $PSScriptRoot
 Set-Location $root
+
+# ---- program only, from the existing .sof -------------------------------
+if ($ProgOnly) {
+    $sof = "output_files\enc28j60_eth.sof"
+    if (-not (Test-Path $sof)) {
+        throw "$sof not found -- run a normal build first (.\build.ps1 or .\build.ps1 -Prog)."
+    }
+    Write-Host "=== Programming board (no compile) ===" -ForegroundColor Cyan
+    $env:PATH = "$QUARTUS;$env:PATH"
+    # Same clone USB-Blaster + openFPGALoader quirk as the -Prog path below:
+    # a raw .sof is rejected ("Error: wrong file"), needs the .rbf instead.
+    quartus_cpf -c $sof output_files\enc28j60_eth.rbf
+    if (-not $?) { throw "sof -> rbf conversion failed" }
+    & $LOADER -c usb-blaster output_files\enc28j60_eth.rbf
+    if (-not $?) { throw "Programming failed -- check WinUSB driver via zadig" }
+    Write-Host "Done." -ForegroundColor Green
+    exit 0
+}
 
 # ---- simulate ----------------------------------------------------------
 if (-not $Prog) {
