@@ -49,6 +49,13 @@ module uart_console #(
     output wire [7:0] msg_rd_data,
     output reg        msg_updated,   // 1-cycle pulse when a line completes
 
+    // Second, independent read port into the same buffer -- for M4's UDP
+    // send path (net_stack), so it can stream the just-completed line out
+    // over SPI without contending with the OLED writer's own read port
+    // above, which addresses the same buffer on its own schedule.
+    input  wire [4:0] tx_rd_addr,
+    output wire [7:0] tx_rd_data,
+
     input  wire       oled_ready,    // OLED driver FSM finished init + clear
     input  wire       oled_nack,     // OLED never ACKed an I2C byte (sticky)
 
@@ -94,6 +101,7 @@ module uart_console #(
     integer   k;
 
     assign msg_rd_data = msg[msg_rd_addr];
+    assign tx_rd_data  = msg[tx_rd_addr];
 
     wire is_eol   = (rx_data == 8'h0D) || (rx_data == 8'h0A);
     wire is_back  = (rx_data == 8'h08) || (rx_data == 8'h7F);

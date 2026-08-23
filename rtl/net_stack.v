@@ -1,27 +1,37 @@
-// net_stack.v -- M3: ARP responder over the ENC28J60's SPI/buffer interface.
+// net_stack.v -- M3 (ARP responder) + M4 (UDP message) over the ENC28J60's
+// SPI/buffer interface.
 //
-// Scope, deliberately: ARP only. ICMP echo is the next increment once ARP is
-// confirmed on real hardware. This project has no ENC28J60 datasheet (unlike
-// the OLED's), and M2 already found two real register-level mistakes from
-// memory alone; ARP is the smaller, fixed-length, checksum-free half of "make
-// ping work" and is a complete, independently useful, independently testable
-// step on its own -- a working ARP responder turns `ping` from "Destination
-// host unreachable" (ARP never resolves) into "Request timed out" (ARP
-// resolves, ICMP doesn't reply yet), which is a real, observable improvement.
+// M3 scope, deliberately: ARP only, no ICMP echo -- ARP is the smaller,
+// fixed-length, checksum-free half of "make ping work" and independently
+// testable on its own. Confirmed on real hardware 2026-08-24 after three
+// real bugs: a stale bank-select on re-poll, the documented ENC28J60
+// transmit-logic errata (ECON1.TXRST must be pulsed before every TX, not
+// just the first), and an unpadded 42-byte ARP reply silently discarded as
+// a runt frame by any real switch (Ethernet's minimum is 60 bytes) -- see
+// git history for each. ICMP echo remains out of scope.
 //
-// Strategy: mirror-and-patch rather than synthesize from scratch. An ARP
-// reply is the request with six fields swapped/changed and everything else
-// copied -- so this reads the request byte-by-byte via RBM, capturing only
-// the ~10 bytes of state actually needed (the sender's MAC and IP), then
-// writes a reply byte-by-byte via WBM, selecting each byte from a small case
-// statement fed by those captured values or fixed constants. No frame is
-// held in local memory in full.
+// M4 scope: the project's own "Hello World" demo -- a UDP datagram to port
+// 1234 whose payload is exactly uart_console's 21-byte message buffer (the
+// same text shown on the OLED), sent whenever a line completes, received
+// and displayed by the peer. Deliberately trivial: fixed payload length
+// (space-padded, matching the OLED line), UDP checksum left at 0x0000
+// (valid per RFC 768 -- zero means "not computed", not "computed as zero"),
+// and an IP header checksum computed once at *compile* time (a function
+// evaluated over localparams, not runtime hardware) since every field of
+// this fixed one-shot packet format is a compile-time constant. No ARP
+// client either: the peer's MAC is derived from HOST_ID with the same
+// formula OUR_MAC already uses, since there are only ever two hosts.
+//
+// Strategy for both: mirror-and-patch / build-from-constants rather than a
+// general packet engine. Frames are read and written one byte at a time
+// over RBM/WBM; nothing is held in local memory in full.
 //
 // This module takes over the SPI bus entirely once `start` pulses (which
 // eth_top asserts once after its own M1/M2 sequence finishes) -- one owner
 // at a time, no arbitration logic needed.
 
 module net_stack #(
+    parameter [7:0]  HOST_ID = 8'd1,                     // 1 or 2; picks the peer
     parameter [47:0] OUR_MAC = 48'h02_42_CE_60_00_01,   // 02:42:CE:60:00:01
     parameter [31:0] OUR_IP  = 32'hC0_A8_01_3C          // 192.168.1.60
 ) (
@@ -36,6 +46,23 @@ module net_stack #(
     input  wire [7:0]  spi_rx,
     input  wire        spi_busy,
 
+    // M4 TX: uart_console's message buffer, read through its own dedicated
+    // port (see uart_console.v) so this never contends with the OLED
+    // writer's independent read of the same buffer. send_req is a 1-cycle
+    // pulse (uart_console's msg_updated, wired straight through by eth_top)
+    // requesting the current buffer be sent as a UDP datagram to the peer.
+    output reg  [4:0]  tx_rd_addr,
+    input  wire [7:0]  tx_rd_data,
+    input  wire        send_req,
+
+    // M4 RX: the last UDP message received from the peer, read through a
+    // dedicated port the same way -- eth_top's OLED writer addresses this
+    // exactly like it addresses uart_console's own buffer. rx_updated is a
+    // 1-cycle pulse each time a new message finishes landing.
+    input  wire [4:0]  rx_rd_addr,
+    output wire [7:0]  rx_rd_data,
+    output reg         rx_updated,
+
     // Diagnostics (all level/sticky, read by uart_console)
     output reg  [15:0] frames_seen,
     output reg  [15:0] arp_replies_sent,
@@ -49,6 +76,15 @@ module net_stack #(
     output reg  [7:0]   last_eir,
     output reg  [7:0]   last_estat
 );
+
+    // ------------------------------------------------------------------
+    // M4: the peer. Only two hosts ever exist, so HOST_ID (1 or 2) picks
+    // the other one with the same formula eth_top.v uses for OUR_MAC/OUR_IP
+    // -- no ARP client needed to learn it dynamically.
+    // ------------------------------------------------------------------
+    localparam [7:0]  PEER_ID  = (HOST_ID == 8'd1) ? 8'd2 : 8'd1;
+    localparam [47:0] PEER_MAC = {40'h02_42_CE_60_00, PEER_ID};
+    localparam [31:0] PEER_IP  = {24'hC0_A8_01, 8'd59 + PEER_ID};
 
     // ------------------------------------------------------------------
     // Opcodes / addresses. Same "widely-documented, not datasheet-verified"
@@ -78,10 +114,50 @@ module net_stack #(
     // cleanly, yet the frame never reaches anything downstream -- exactly
     // what every compliant switch does with a runt frame, silently. Padding
     // explicitly here removes the dependency on that unverified register.
-    localparam integer TX_LEN = 60;      // Ethernet minimum, header+payload
-    // Control byte (1) + TX_LEN bytes; ETXND is inclusive of the last byte
-    // written, so ETXST + (1 + TX_LEN) - 1.
-    localparam [15:0] ARP_ETXND = ETXST + TX_LEN[15:0];
+    localparam integer ARP_TX_LEN = 60;  // Ethernet minimum, header+payload
+    // Control byte (1) + ARP_TX_LEN bytes; ETXND is inclusive of the last
+    // byte written, so ETXST + (1 + ARP_TX_LEN) - 1.
+    localparam [15:0] ARP_ETXND = ETXST + ARP_TX_LEN[15:0];
+
+    // ------------------------------------------------------------------
+    // M4 UDP message: Ethernet(14) + IP(20, no options) + UDP(8) + a fixed
+    // 21-byte payload (uart_console's MSG_LEN, always fully populated --
+    // shorter lines are space-padded there already) = 63 bytes, already
+    // above the 60-byte Ethernet minimum, so no extra padding needed here.
+    // ------------------------------------------------------------------
+    localparam integer MSG_LEN     = 21;
+    localparam integer MSG_HDR_LEN = 14 + 20 + 8;                  // 42
+    localparam integer MSG_TX_LEN  = MSG_HDR_LEN + MSG_LEN;        // 63
+    localparam [15:0]  MSG_ETXND   = ETXST + MSG_TX_LEN[15:0];
+    localparam [15:0]  UDP_PORT    = 16'd1234;                     // 0x04D2
+    localparam [15:0]  IP_TOTAL_LEN = 16'd20 + 16'd8 + MSG_LEN[15:0]; // 49
+
+    // IPv4 header checksum: ones'-complement sum of the header's 16-bit
+    // words (checksum field itself treated as zero), folded, then
+    // complemented. Every field of this fixed one-shot header is a
+    // compile-time constant (OUR_IP/PEER_IP included, both parameters), so
+    // this function is evaluated once at elaboration -- no runtime checksum
+    // hardware needed.
+    function [15:0] ip_checksum(input [15:0] w0, w1, w2, w3, w4, w6, w7, w8, w9);
+        reg [31:0] sum;
+        begin
+            sum = w0 + w1 + w2 + w3 + w4 + w6 + w7 + w8 + w9;
+            sum = sum[15:0] + sum[31:16];   // fold carry back in
+            sum = sum[15:0] + sum[31:16];   // fold again: the first fold's
+                                             // own carry-out is at most 1
+            ip_checksum = ~sum[15:0];
+        end
+    endfunction
+
+    localparam [15:0] IP_CHECKSUM = ip_checksum(
+        16'h4500,               // version=4, IHL=5, TOS=0
+        IP_TOTAL_LEN,
+        16'h0000,               // identification
+        16'h0000,               // flags=0, fragment offset=0
+        {8'd64, 8'd17},         // TTL=64, protocol=17 (UDP)
+        OUR_IP[31:16],  OUR_IP[15:0],
+        PEER_IP[31:16], PEER_IP[15:0]
+    );
 
     // ------------------------------------------------------------------
     // Bit-banged SPI transaction primitives, matching eth_top's M1/M2 style.
@@ -91,8 +167,11 @@ module net_stack #(
     always @(posedge clk) spi_busy_d <= spi_busy;
 
     // ------------------------------------------------------------------
-    // ARP frame layout (offsets from the start of the Ethernet frame, as
-    // delivered by RBM right after the 6-byte per-packet RX header):
+    // RX frame layout (offsets from the start of the Ethernet frame, as
+    // delivered by RBM right after the 6-byte per-packet RX header). Two
+    // frame types share the same 0-13 prefix and diverge after that:
+    //
+    // ARP:
     //   0-5   dest MAC   6-11  src MAC        12-13 EtherType (0x0806=ARP)
     //   14-15 HTYPE(=1)  16-17 PTYPE(=0x0800) 18 HLEN(=6)    19 PLEN(=4)
     //   20-21 OPER (1=request, 2=reply)
@@ -100,15 +179,28 @@ module net_stack #(
     //   32-37 THA (target MAC)  38-41 TPA (target IP)
     // A reply mirrors the request with: dest MAC <- SHA, src MAC <- ours,
     // OPER <- 2, SHA <- ours, SPA <- ours, THA <- old SHA, TPA <- old SPA.
+    //
+    // IPv4/UDP (M4), assuming a standard 20-byte IP header (IHL=5, no
+    // options -- true for both this design's own TX and any normal sender):
+    //   0-5 dest MAC  6-11 src MAC  12-13 EtherType (0x0800=IPv4)
+    //   14 ver/IHL  15 TOS  16-17 total length  18-19 ID  20-21 flags/frag
+    //   22 TTL  23 protocol (0x11=UDP)  24-25 header checksum
+    //   26-29 source IP  30-33 destination IP
+    //   34-35 UDP src port  36-37 UDP dst port (must be 1234)
+    //   38-39 UDP length  40-41 UDP checksum
+    //   42-62 UDP payload (21 bytes, the message)
     // ------------------------------------------------------------------
     reg [47:0] sender_mac;
     reg [31:0] sender_ip, target_ip;
     reg [15:0] next_rdpt;      // where the next RX packet's header begins
     reg [15:0] cur_next_ptr;   // this packet's own "next packet" field
-    reg [5:0]  rxpos;          // 0..41, byte offset within the ARP frame
-    reg [5:0]  txpos;
+    reg [5:0]  rxpos;          // 0..62, byte offset within the frame (fits: max 63)
+    reg [5:0]  txpos;          // 0..63 likewise
     reg [7:0]  hdr_byte_idx;   // 0..5, the 6-byte per-packet RX header
     reg        is_arp, is_request, target_is_us;
+    reg        is_ip, is_udp, dest_ip_is_us, is_our_port;
+    reg        ethertype_hi08;   // scratch: high byte of EtherType was 0x08
+    reg [7:0]  udp_payload [0:MSG_LEN-1];
 
     // ------------------------------------------------------------------
     // FSM
@@ -129,7 +221,16 @@ module net_stack #(
                S_WCR_OP     = 6'd30, S_WCR_DATA   = 6'd31, // generic 1-shot WCR
                S_RCR_OP     = 6'd32, S_RCR_WAIT   = 6'd33, // generic 1-shot RCR
                S_RD_EIR_GO  = 6'd34, S_RD_ESTAT_GO = 6'd35, // TX diagnostic readback
-               S_TXRST0     = 6'd36, S_TXRST1     = 6'd37; // errata: reset TX logic before every TX
+               S_TXRST0     = 6'd36, S_TXRST1     = 6'd37, // errata: reset TX logic before every TX
+               // ---- M4: send the current typed line as a UDP message ----
+               S_MSGBANK    = 6'd38, S_MSGWRPT0   = 6'd39, S_MSGWRPT1   = 6'd40,
+               S_MSGTXRST0  = 6'd41, S_MSGTXRST1  = 6'd42,
+               S_MSGOP      = 6'd43, S_MSGOPWAIT  = 6'd44,
+               S_MSGHDR_GO  = 6'd45, S_MSGHDR_WT  = 6'd46,
+               S_MSGBOD_GO  = 6'd47, S_MSGBOD_WT  = 6'd48,
+               S_MSGETXND0  = 6'd49, S_MSGETXND1  = 6'd50,
+               S_MSGTXRTS   = 6'd51, S_MSGTXWAIT  = 6'd52, S_MSGDONE = 6'd53,
+               S_MSGCTRL_GO = 6'd54, S_MSGCTRL_WT = 6'd55;
 
     reg [5:0]  state, ret_state;    // ret_state: where the generic WCR/RCR returns to
     reg [4:0]  wcr_addr;
@@ -137,6 +238,7 @@ module net_stack #(
     reg [4:0]  rcr_addr;
     reg [7:0]  rcr_rb;              // generic RCR's captured byte
     reg [26:0] wait_cnt;
+    reg        send_pending;    // M4: a typed line is waiting to go out
 
     // One TX byte, addressed by txpos, for the 42-byte ARP reply (43 with
     // the leading per-packet control byte handled separately in S_WBM_OP).
@@ -191,8 +293,67 @@ module net_stack #(
                 6'd39: arp_reply_byte = sender_ip[23:16];
                 6'd40: arp_reply_byte = sender_ip[15:8];
                 6'd41: arp_reply_byte = sender_ip[7:0];
-                // Padding up to TX_LEN (60), see the ARP_ETXND comment above.
+                // Padding up to ARP_TX_LEN (60), see the ARP_ETXND comment above.
                 default: arp_reply_byte = 8'h00;
+            endcase
+        end
+    endfunction
+
+    // One header byte (0..41) of the M4 UDP message: fixed Ethernet + IPv4 +
+    // UDP header, entirely from compile-time constants -- see the header
+    // comment for the field layout and IP_CHECKSUM for why no runtime
+    // checksum computation is needed.
+    function [7:0] msg_hdr_byte(input [5:0] p);
+        begin
+            case (p)
+                // dest MAC = peer's
+                6'd0: msg_hdr_byte = PEER_MAC[47:40];
+                6'd1: msg_hdr_byte = PEER_MAC[39:32];
+                6'd2: msg_hdr_byte = PEER_MAC[31:24];
+                6'd3: msg_hdr_byte = PEER_MAC[23:16];
+                6'd4: msg_hdr_byte = PEER_MAC[15:8];
+                6'd5: msg_hdr_byte = PEER_MAC[7:0];
+                // src MAC = ours
+                6'd6:  msg_hdr_byte = OUR_MAC[47:40];
+                6'd7:  msg_hdr_byte = OUR_MAC[39:32];
+                6'd8:  msg_hdr_byte = OUR_MAC[31:24];
+                6'd9:  msg_hdr_byte = OUR_MAC[23:16];
+                6'd10: msg_hdr_byte = OUR_MAC[15:8];
+                6'd11: msg_hdr_byte = OUR_MAC[7:0];
+                6'd12: msg_hdr_byte = 8'h08;  // EtherType 0x0800 (IPv4)
+                6'd13: msg_hdr_byte = 8'h00;
+                6'd14: msg_hdr_byte = 8'h45;  // version=4, IHL=5
+                6'd15: msg_hdr_byte = 8'h00;  // TOS
+                6'd16: msg_hdr_byte = IP_TOTAL_LEN[15:8];
+                6'd17: msg_hdr_byte = IP_TOTAL_LEN[7:0];
+                6'd18: msg_hdr_byte = 8'h00;  // identification
+                6'd19: msg_hdr_byte = 8'h00;
+                6'd20: msg_hdr_byte = 8'h00;  // flags/fragment offset
+                6'd21: msg_hdr_byte = 8'h00;
+                6'd22: msg_hdr_byte = 8'd64;  // TTL
+                6'd23: msg_hdr_byte = 8'd17;  // protocol = UDP
+                6'd24: msg_hdr_byte = IP_CHECKSUM[15:8];
+                6'd25: msg_hdr_byte = IP_CHECKSUM[7:0];
+                // source IP = ours
+                6'd26: msg_hdr_byte = OUR_IP[31:24];
+                6'd27: msg_hdr_byte = OUR_IP[23:16];
+                6'd28: msg_hdr_byte = OUR_IP[15:8];
+                6'd29: msg_hdr_byte = OUR_IP[7:0];
+                // destination IP = peer's
+                6'd30: msg_hdr_byte = PEER_IP[31:24];
+                6'd31: msg_hdr_byte = PEER_IP[23:16];
+                6'd32: msg_hdr_byte = PEER_IP[15:8];
+                6'd33: msg_hdr_byte = PEER_IP[7:0];
+                // UDP src port (reused as dst port too -- a fixed p2p pair,
+                // the actual value doesn't matter as long as both agree)
+                6'd34: msg_hdr_byte = UDP_PORT[15:8];
+                6'd35: msg_hdr_byte = UDP_PORT[7:0];
+                6'd36: msg_hdr_byte = UDP_PORT[15:8];
+                6'd37: msg_hdr_byte = UDP_PORT[7:0];
+                6'd38: msg_hdr_byte = 8'h00;  // UDP length = 8 + MSG_LEN = 29
+                6'd39: msg_hdr_byte = 8'd29;
+                6'd40: msg_hdr_byte = 8'h00;  // UDP checksum: 0 = not computed (RFC 768)
+                default: msg_hdr_byte = 8'h00;   // 41
             endcase
         end
     endfunction
@@ -203,8 +364,17 @@ module net_stack #(
     // end instead (avoids ERXRDPT ever landing one before ERXST).
     wire [15:0] next_erxrdpt = (cur_next_ptr == ERXST) ? ERXND : (cur_next_ptr - 16'd1);
 
+    assign rx_rd_data = udp_payload[rx_rd_addr];
+
     always @(posedge clk) begin
-        spi_start <= 1'b0;
+        spi_start  <= 1'b0;
+        rx_updated <= 1'b0;
+        // Sticky, set here unconditionally so a line completed while
+        // net_stack is mid-RX-processing isn't missed; cleared once the
+        // send actually starts (S_MSG_TXBANK below). A later assignment in
+        // the same always block (the rst clear, or that clear-on-start)
+        // wins over this tentative one for the same clock edge.
+        if (send_req) send_pending <= 1'b1;
 
         if (rst) begin
             state            <= S_INIT0;
@@ -215,6 +385,7 @@ module net_stack #(
             arp_replies_sent <= 16'd0;
             last_eir         <= 8'd0;
             last_estat       <= 8'd0;
+            send_pending     <= 1'b0;
         end else if (!start && state == S_INIT0) begin
             // idle until eth_top hands off the bus
         end else begin
@@ -249,7 +420,10 @@ module net_stack #(
                 S_POLL_CHECK:
                     if (spi_rx == 8'h00) begin
                         wait_cnt <= 0;
-                        state    <= S_POLL;   // nothing waiting, poll again
+                        // Nothing waiting to receive -- if a typed line is
+                        // queued to go out (M4), send it now; otherwise poll
+                        // again.
+                        state <= send_pending ? S_MSGBANK : S_POLL;
                     end else begin
                         state <= S_SETRDPT0;
                     end
@@ -281,6 +455,10 @@ module net_stack #(
                     is_arp       <= 1'b0;
                     is_request   <= 1'b0;
                     target_is_us <= 1'b0;
+                    is_ip         <= 1'b0;
+                    is_udp        <= 1'b0;
+                    dest_ip_is_us <= 1'b0;
+                    is_our_port   <= 1'b0;
                     state        <= S_RBM_OPWAIT;
                 end
                 // The opcode byte's own reply is meaningless (RBM is a fixed
@@ -315,42 +493,76 @@ module net_stack #(
                         end
                     end
 
-                // The Ethernet+ARP frame itself, byte by byte. Abandons
-                // early (jumps to cleanup) as soon as it is clearly not an
-                // ARP request for us -- no need to read bytes we will not
-                // use, and every frame still needs the cleanup step either
-                // way, regardless of whether we respond to it.
+                // The Ethernet frame itself, byte by byte. Bytes 0-13 (dest/
+                // src MAC, EtherType) are shared between ARP and IP/UDP;
+                // byte 13 resolves which one this is, and rxpos 14 onward is
+                // interpreted differently per protocol. Abandons early
+                // (jumps to cleanup) the moment it is clearly not something
+                // we care about -- no need to read bytes we will not use,
+                // and every frame still needs the cleanup step either way.
                 S_RBM_BOD_GO: begin
                     spi_tx <= 8'h00; spi_start <= 1'b1;
                     state  <= S_RBM_BOD_WT;
                 end
                 S_RBM_BOD_WT:
                     if (spi_done) begin
-                        case (rxpos)
-                            6'd12: is_arp <= (spi_rx == 8'h08);
-                            6'd21: is_request <= (spi_rx == 8'h01);
-                            6'd22: sender_mac[47:40] <= spi_rx;
-                            6'd23: sender_mac[39:32] <= spi_rx;
-                            6'd24: sender_mac[31:24] <= spi_rx;
-                            6'd25: sender_mac[23:16] <= spi_rx;
-                            6'd26: sender_mac[15:8]  <= spi_rx;
-                            6'd27: sender_mac[7:0]   <= spi_rx;
-                            6'd28: sender_ip[31:24]  <= spi_rx;
-                            6'd29: sender_ip[23:16]  <= spi_rx;
-                            6'd30: sender_ip[15:8]   <= spi_rx;
-                            6'd31: sender_ip[7:0]    <= spi_rx;
-                            6'd38: target_ip[31:24]  <= spi_rx;
-                            6'd39: target_ip[23:16]  <= spi_rx;
-                            6'd40: target_ip[15:8]   <= spi_rx;
-                            6'd41: target_ip[7:0]    <= spi_rx;
-                            default: ;
-                        endcase
+                        if (rxpos < 6'd14) begin
+                            if (rxpos == 6'd12) ethertype_hi08 <= (spi_rx == 8'h08);
+                            if (rxpos == 6'd13) begin
+                                is_arp <= ethertype_hi08 && (spi_rx == 8'h06);
+                                is_ip  <= ethertype_hi08 && (spi_rx == 8'h00);
+                            end
+                        end else if (is_ip) begin
+                            case (rxpos)
+                                6'd23: is_udp          <= (spi_rx == 8'h11);
+                                6'd30: target_ip[31:24] <= spi_rx;
+                                6'd31: target_ip[23:16] <= spi_rx;
+                                6'd32: target_ip[15:8]  <= spi_rx;
+                                6'd33: dest_ip_is_us    <= ({target_ip[31:8], spi_rx} == OUR_IP);
+                                6'd36: is_our_port      <= (spi_rx == UDP_PORT[15:8]);
+                                6'd37: is_our_port      <= is_our_port && (spi_rx == UDP_PORT[7:0]);
+                                default:
+                                    if (rxpos >= 6'd42) udp_payload[rxpos - 6'd42] <= spi_rx;
+                            endcase
+                        end else begin
+                            case (rxpos)
+                                6'd21: is_request <= (spi_rx == 8'h01);
+                                6'd22: sender_mac[47:40] <= spi_rx;
+                                6'd23: sender_mac[39:32] <= spi_rx;
+                                6'd24: sender_mac[31:24] <= spi_rx;
+                                6'd25: sender_mac[23:16] <= spi_rx;
+                                6'd26: sender_mac[15:8]  <= spi_rx;
+                                6'd27: sender_mac[7:0]   <= spi_rx;
+                                6'd28: sender_ip[31:24]  <= spi_rx;
+                                6'd29: sender_ip[23:16]  <= spi_rx;
+                                6'd30: sender_ip[15:8]   <= spi_rx;
+                                6'd31: sender_ip[7:0]    <= spi_rx;
+                                6'd38: target_ip[31:24]  <= spi_rx;
+                                6'd39: target_ip[23:16]  <= spi_rx;
+                                6'd40: target_ip[15:8]   <= spi_rx;
+                                6'd41: target_ip[7:0]    <= spi_rx;
+                                default: ;
+                            endcase
+                        end
 
-                        // Not ARP: stop reading, nothing more to learn.
-                        if (rxpos == 6'd13 && !(is_arp && spi_rx == 8'h06)) begin
+                        // Neither ARP nor IP: stop reading, nothing more to learn.
+                        if (rxpos == 6'd13 && !(ethertype_hi08 && (spi_rx == 8'h06 || spi_rx == 8'h00))) begin
                             cs_n  <= 1'b1;
                             state <= S_CLEANUP0;
-                        end else if (rxpos == 6'd41) begin
+                        // IP path: bail the moment it's clearly not "UDP to our port".
+                        end else if (is_ip && rxpos == 6'd23 && spi_rx != 8'h11) begin
+                            cs_n  <= 1'b1;
+                            state <= S_CLEANUP0;
+                        end else if (is_ip && rxpos == 6'd33 && {target_ip[31:8], spi_rx} != OUR_IP) begin
+                            cs_n  <= 1'b1;
+                            state <= S_CLEANUP0;
+                        end else if (is_ip && rxpos == 6'd37 && !(is_our_port && spi_rx == UDP_PORT[7:0])) begin
+                            cs_n  <= 1'b1;
+                            state <= S_CLEANUP0;
+                        end else if (is_ip && rxpos == 6'd62) begin
+                            cs_n  <= 1'b1;
+                            state <= S_CLEANUP0;
+                        end else if (!is_ip && rxpos == 6'd41) begin
                             target_is_us <= ({target_ip[31:8], spi_rx} == OUR_IP);
                             cs_n         <= 1'b1;
                             state        <= S_CLEANUP0;
@@ -363,6 +575,16 @@ module net_stack #(
                 // ---- cleanup: always run, then branch to TX if warranted ----
                 S_CLEANUP0: begin
                     cs_n <= 1'b1;
+                    // A valid M4 message: no reply needed, just latch it for
+                    // eth_top's OLED writer to pick up (udp_payload itself
+                    // was already captured byte-by-byte during the walk
+                    // above). This check is correct regardless of whether we
+                    // got here via early abort or full completion: each flag
+                    // only ever reaches 1 once its own check actually passed
+                    // (see the S_RBM_BOD_WT walk), so an aborted frame always
+                    // leaves at least one of these still 0.
+                    if (is_ip && is_udp && dest_ip_is_us && is_our_port)
+                        rx_updated <= 1'b1;
                     // Decide whether to reply *before* touching ECON1/ERXRDPT,
                     // so the branch below always lands correctly.
                     if (is_arp && is_request && target_is_us) begin
@@ -400,9 +622,9 @@ module net_stack #(
                     if (spi_done) state <= S_WBM_BOD_GO;
 
                 // Byte 0 of the write is the per-packet control byte (0x00:
-                // defer CRC to MACON3.TXCRCEN). Bytes 1..TX_LEN are the
+                // defer CRC to MACON3.TXCRCEN). Bytes 1..ARP_TX_LEN are the
                 // 42-byte ARP reply followed by explicit zero padding up to
-                // TX_LEN -- see the ARP_ETXND comment above for why this
+                // ARP_TX_LEN -- see the ARP_ETXND comment above for why this
                 // isn't left to MACON3.PADCFG.
                 S_WBM_BOD_GO: begin
                     spi_tx    <= (txpos == 6'd0) ? 8'h00 : arp_reply_byte(txpos - 6'd1);
@@ -411,7 +633,7 @@ module net_stack #(
                 end
                 S_WBM_BOD_WT:
                     if (spi_done) begin
-                        if (txpos == TX_LEN[5:0]) begin
+                        if (txpos == ARP_TX_LEN[5:0]) begin
                             cs_n  <= 1'b1;
                             state <= S_SETETXND0;
                         end else begin
@@ -520,6 +742,124 @@ module net_stack #(
                     wcr_addr    <= A_ECON2; wcr_data <= 8'hC0;   // AUTOINC + PKTDEC
                     ret_state   <= S_INIT1;
                     state       <= S_WCR_OP;
+                end
+
+                // ---- M4: send the current typed line as a UDP message ----
+                // Standalone TX, not triggered by an RX frame -- mirrors the
+                // ARP reply's bank/pointer/TXRST/TXRTS sequence, but starts
+                // fresh from S_POLL_CHECK instead of RX cleanup, and returns
+                // to S_INIT1 itself (no RX buffer pointers to restore).
+                S_MSGBANK: begin
+                    wcr_addr  <= A_ECON1; wcr_data <= 8'h00;    // bank 0
+                    ret_state <= S_MSGWRPT0;
+                    state     <= S_WCR_OP;
+                end
+                S_MSGWRPT0: begin
+                    wcr_addr  <= A_EWRPTL; wcr_data <= ETXST[7:0];
+                    ret_state <= S_MSGWRPT1;
+                    state     <= S_WCR_OP;
+                end
+                S_MSGWRPT1: begin
+                    wcr_addr  <= A_EWRPTH; wcr_data <= ETXST[15:8];
+                    ret_state <= S_MSGTXRST0;
+                    state     <= S_WCR_OP;
+                end
+                S_MSGTXRST0: begin
+                    wcr_addr  <= A_ECON1; wcr_data <= 8'h80;    // TXRST=1
+                    ret_state <= S_MSGTXRST1;
+                    state     <= S_WCR_OP;
+                end
+                S_MSGTXRST1: begin
+                    wcr_addr  <= A_ECON1; wcr_data <= 8'h00;    // TXRST=0
+                    ret_state <= S_MSGOP;
+                    state     <= S_WCR_OP;
+                end
+
+                S_MSGOP: begin
+                    cs_n      <= 1'b0;
+                    spi_tx    <= OP_WBM;
+                    spi_start <= 1'b1;
+                    txpos     <= 6'd0;
+                    state     <= S_MSGOPWAIT;
+                end
+                S_MSGOPWAIT:
+                    if (spi_done) state <= S_MSGCTRL_GO;
+
+                // Per-packet control byte (0x00: defer CRC to MACON3.TXCRCEN),
+                // same as the ARP path's leading byte in S_WBM_BOD_GO -- easy
+                // to miss since it isn't part of msg_hdr_byte's own 0..41
+                // range, but every WBM-written frame needs exactly one.
+                S_MSGCTRL_GO: begin
+                    spi_tx    <= 8'h00;
+                    spi_start <= 1'b1;
+                    state     <= S_MSGCTRL_WT;
+                end
+                S_MSGCTRL_WT:
+                    if (spi_done) state <= S_MSGHDR_GO;
+
+                // 42 fixed header bytes, then MSG_LEN payload bytes read
+                // live from uart_console via tx_rd_addr/tx_rd_data.
+                S_MSGHDR_GO: begin
+                    spi_tx    <= msg_hdr_byte(txpos);
+                    spi_start <= 1'b1;
+                    state     <= S_MSGHDR_WT;
+                end
+                S_MSGHDR_WT:
+                    if (spi_done) begin
+                        if (txpos == MSG_HDR_LEN[5:0] - 6'd1) begin
+                            txpos      <= 6'd0;
+                            tx_rd_addr <= 5'd0;
+                            state      <= S_MSGBOD_GO;
+                        end else begin
+                            txpos <= txpos + 6'd1;
+                            state <= S_MSGHDR_GO;
+                        end
+                    end
+                S_MSGBOD_GO: begin
+                    spi_tx     <= tx_rd_data;
+                    tx_rd_addr <= tx_rd_addr + 5'd1;   // set up the NEXT byte
+                    spi_start  <= 1'b1;
+                    state      <= S_MSGBOD_WT;
+                end
+                S_MSGBOD_WT:
+                    if (spi_done) begin
+                        if (txpos == MSG_LEN[5:0] - 6'd1) begin
+                            cs_n  <= 1'b1;
+                            state <= S_MSGETXND0;
+                        end else begin
+                            txpos <= txpos + 6'd1;
+                            state <= S_MSGBOD_GO;
+                        end
+                    end
+
+                S_MSGETXND0: begin
+                    wcr_addr  <= A_ETXNDL; wcr_data <= MSG_ETXND[7:0];
+                    ret_state <= S_MSGETXND1;
+                    state     <= S_WCR_OP;
+                end
+                S_MSGETXND1: begin
+                    wcr_addr  <= A_ETXNDH; wcr_data <= MSG_ETXND[15:8];
+                    ret_state <= S_MSGTXRTS;
+                    state     <= S_WCR_OP;
+                end
+                S_MSGTXRTS: begin
+                    wcr_addr  <= A_ECON1; wcr_data <= 8'h0C;    // RXEN=1, TXRTS=1
+                    ret_state <= S_MSGTXWAIT;
+                    state     <= S_WCR_OP;
+                end
+                S_MSGTXWAIT:
+                    if (wait_cnt == 27'd25_000) begin
+                        wait_cnt <= 0;
+                        state    <= S_MSGDONE;
+                    end else begin
+                        wait_cnt <= wait_cnt + 1'b1;
+                    end
+                // Bank was never changed away from 0 on this path (unlike
+                // the ARP reply, no RX pointer restore is needed), so head
+                // to S_INIT1 to reselect bank 1 before polling again.
+                S_MSGDONE: begin
+                    send_pending <= 1'b0;
+                    state        <= S_INIT1;
                 end
 
                 // ---- generic single WCR, returns to ret_state ----

@@ -52,6 +52,11 @@ module eth_top #(
     // already with o_ready/oled_i2c_err_sticky further down).
     reg        eth_ready;            // M2 complete (level, held)
 
+    // Same reason as eth_ready above: net_stack's instantiation (M4's
+    // send_req) needs this before uart_console (which actually drives it,
+    // via msg_updated) is instantiated further down.
+    wire       msg_updated;
+
     // ------------------------------------------------------------------
     // SPI master (12.5 MHz for bring-up; final design moves to 20 MHz)
     // ------------------------------------------------------------------
@@ -85,13 +90,25 @@ module eth_top #(
         .miso   (enc_miso)
     );
 
+    // M4: net_stack's own read port into uart_console's message buffer (TX),
+    // and the buffer it exposes for a received message (RX) -- both wired to
+    // uart_console/the OLED writer further down.
+    wire [4:0] net_tx_rd_addr;
+    wire [7:0] net_tx_rd_data;
+    wire [4:0] net_rx_rd_addr;
+    wire [7:0] net_rx_rd_data;
+    wire       net_rx_updated;
+
     net_stack #(
+        .HOST_ID(HOST_ID),
         .OUR_MAC({40'h0242CE6000, HOST_ID}),
         .OUR_IP ({24'hC0A801, 8'd59 + HOST_ID})
     ) u_net (
         .clk(clk), .rst(rst), .start(eth_ready),
         .cs_n(net_cs_n), .spi_start(net_spi_start), .spi_tx(net_spi_tx),
         .spi_rx(spi_rx), .spi_busy(spi_busy),
+        .tx_rd_addr(net_tx_rd_addr), .tx_rd_data(net_tx_rd_data), .send_req(msg_updated),
+        .rx_rd_addr(net_rx_rd_addr), .rx_rd_data(net_rx_rd_data), .rx_updated(net_rx_updated),
         .frames_seen(eth_frames_seen), .arp_replies_sent(eth_arp_replies),
         .last_eir(eth_last_eir), .last_estat(eth_last_estat)
     );
@@ -455,11 +472,12 @@ module eth_top #(
     //   line 0   EP4CE6E22 ENC28J60
     //   line 1   EREVID 0xNN OK|BAD
     //   line 2   HOST A 192.168.1.60
-    //   line 3   MSG <payload>
+    //   line 3   text typed locally, or received from the peer (M4)
     //
-    // Line 3 is the integration point for milestone 4: today it holds a
-    // placeholder, and once UDP receive exists the payload is written through
-    // the same msg_* port instead.
+    // Line 3 shows whichever happened more recently: a line typed over the
+    // serial port (msg_updated, also triggers net_stack to send it to the
+    // peer as a UDP message) or one received from the peer (net_rx_updated).
+    // See use_net_msg below.
     // ------------------------------------------------------------------
     localparam integer OCOLS = 21;
 
@@ -511,7 +529,7 @@ module eth_top #(
 
     wire [4:0] msg_addr;          // driven by the display writer below
     wire [7:0] msg_char;
-    wire       msg_updated;
+    // msg_updated is declared near the top of the module -- see the comment there.
 
     // Declared here, ahead of u_con's instantiation below, so nothing forces
     // an implicit net: o_ready and oled_i2c_err are driven by u_oled further
@@ -524,6 +542,7 @@ module eth_top #(
         .clk(clk), .rst(rst),
         .keys(keys), .keys_changed(keys_changed),
         .msg_rd_addr(msg_addr), .msg_rd_data(msg_char), .msg_updated(msg_updated),
+        .tx_rd_addr(net_tx_rd_addr), .tx_rd_data(net_tx_rd_data),
         .oled_ready(o_ready), .oled_nack(oled_i2c_err_sticky),
         .eth_ready(eth_ready), .eth_econ1(econ1_rb),
         .net_frames(eth_frames_seen), .net_replies(eth_arp_replies),
@@ -539,9 +558,17 @@ module eth_top #(
     reg        o_refresh;
     reg  [7:0] last_shown;
     reg        redraw_pending;
+    // M4: which source currently feeds line 3 -- the last-typed local line,
+    // or the last message received from the peer. Whichever happened more
+    // recently wins; a locally-typed line always takes priority over a
+    // stale received one arriving to be shown, since it's the user's own
+    // action on this board.
+    reg        use_net_msg;
 
-    // Line 3 of the panel reads straight out of the console's line buffer.
-    assign msg_addr = (w_addr >= 7'd63) ? (w_addr - 7'd63) : 5'd0;
+    // Line 3 of the panel reads straight out of whichever buffer is active.
+    // Both are the same 21-byte layout, addressed identically.
+    assign msg_addr        = (w_addr >= 7'd63) ? (w_addr - 7'd63) : 5'd0;
+    assign net_rx_rd_addr  = msg_addr;
 
     always @(posedge clk) begin
         if (rst) begin
@@ -552,7 +579,10 @@ module eth_top #(
             last_shown          <= 8'hFF;
             redraw_pending      <= 1'b0;
             oled_i2c_err_sticky <= 1'b0;
+            use_net_msg         <= 1'b0;
         end else begin
+            if (net_rx_updated) use_net_msg <= 1'b1;
+            if (msg_updated)    use_net_msg <= 1'b0;
             o_refresh <= 1'b0;
             if (oled_i2c_err) oled_i2c_err_sticky <= 1'b1;
             if (!w_done) begin
@@ -572,9 +602,10 @@ module eth_top #(
                     7'd48: w_char <= keys[1] ? "1" : ".";
                     7'd49: w_char <= keys[2] ? "2" : ".";
                     7'd50: w_char <= keys[3] ? "3" : ".";
-                    // line 3: the text typed over the serial port
+                    // line 3: the text typed locally, or received from the
+                    // peer (M4) -- whichever happened more recently
                     default:
-                        if (w_addr >= 7'd63) w_char <= msg_char;
+                        if (w_addr >= 7'd63) w_char <= use_net_msg ? net_rx_rd_data : msg_char;
                         else                 w_char <= tmpl[w_addr];
                 endcase
                 if (w_addr == OCOLS*4-1) begin
@@ -589,13 +620,13 @@ module eth_top #(
                 // readback (so a loose SPI wire shows up here and not only on
                 // the LEDs), a button, or a new line over the serial port.
                 if (o_ready && ((erevid != last_shown) || keys_changed
-                                || msg_updated || redraw_pending)) begin
+                                || msg_updated || net_rx_updated || redraw_pending)) begin
                     o_refresh      <= 1'b1;
                     last_shown     <= erevid;
                     redraw_pending <= 1'b0;
                     w_addr         <= 7'd0;
                     w_done         <= 1'b0;
-                end else if (keys_changed || msg_updated) begin
+                end else if (keys_changed || msg_updated || net_rx_updated) begin
                     // A change arriving mid-repaint would otherwise be lost:
                     // a full refresh takes ~25 ms and o_ready is low throughout.
                     redraw_pending <= 1'b1;
