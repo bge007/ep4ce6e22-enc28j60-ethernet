@@ -91,7 +91,13 @@ Select-String -Path output_files\enc28j60_eth.fit.rpt `
 # ---- program -----------------------------------------------------------
 if ($Prog) {
     Write-Host "=== Programming board ===" -ForegroundColor Cyan
-    & $LOADER -c usb-blaster output_files\enc28j60_eth.sof
+    # This clone USB-Blaster + openFPGALoader combination rejects a raw .sof
+    # ("Error: wrong file") and needs the raw bitstream (.rbf) instead.
+    # Verified on hardware 2026-08-23.
+    $env:PATH = "$QUARTUS;$env:PATH"
+    quartus_cpf -c output_files\enc28j60_eth.sof output_files\enc28j60_eth.rbf
+    if (-not $?) { throw "sof -> rbf conversion failed" }
+    & $LOADER -c usb-blaster output_files\enc28j60_eth.rbf
     if (-not $?) { throw "Programming failed -- check WinUSB driver via zadig" }
 }
 
