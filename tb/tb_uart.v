@@ -55,10 +55,21 @@ module tb_uart;
     reg        host_rx = 1'b1;             // idle high, driven by the "PC"
     wire       host_tx;                    // console -> PC
 
+    // Tied off: this testbench covers the UART/console path, not the OLED
+    // status lines (tb_oled.v exercises the OLED driver itself). Holding
+    // both low keeps req_oled_rdy/req_oled_err from ever firing here, so the
+    // existing banner/keys/echo byte-stream assertions below stay exact.
+    reg        oled_ready_tb = 1'b0;
+    reg        oled_nack_tb  = 1'b0;
+    reg        eth_ready_tb  = 1'b0;
+    reg  [7:0] eth_econ1_tb  = 8'h00;
+
     uart_console #(.CLK_HZ(CLK_HZ), .BAUD(BAUD), .HOST_ID(8'd1)) dut (
         .clk(clk), .rst(rst),
         .keys(keys), .keys_changed(keys_changed),
         .msg_rd_addr(msg_addr), .msg_rd_data(msg_char), .msg_updated(msg_updated),
+        .oled_ready(oled_ready_tb), .oled_nack(oled_nack_tb),
+        .eth_ready(eth_ready_tb), .eth_econ1(eth_econ1_tb),
         .uart_rx_pin(host_rx), .uart_tx_pin(host_tx));
 
     // Collect everything the console transmits.

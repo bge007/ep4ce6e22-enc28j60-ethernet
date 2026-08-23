@@ -16,7 +16,11 @@
 
 module eth_top #(
     // 1 = Host A (192.168.1.60), 2 = Host B (192.168.1.61). Build twice.
-    parameter [7:0] HOST_ID = 8'd1
+    parameter [7:0]  HOST_ID = 8'd1,
+    // Diagnostic escape hatch -- see oled_sh1106.v's SSD1306_COMPAT comment.
+    // Set to 1 if the OLED never lights despite clean I2C ACKs, to rule out
+    // an SH1106/SSD1306 chip mislabelling on the physical module.
+    parameter integer OLED_SSD1306_COMPAT = 0
 ) (
     input  wire       clk,        // 50 MHz
     input  wire       nrst,       // board reset button, active low
@@ -72,6 +76,115 @@ module eth_top #(
     localparam [7:0] OP_RCR_EREVID = {3'b000, 5'h12};    // read  EREVID (bank 3)
     localparam [7:0] BANK3         = 8'h03;
 
+    // Register addresses below are the standard, widely-documented ENC28J60
+    // map (this project was not supplied that datasheet, unlike the OLED's --
+    // only general knowledge of this very common chip). The read-back this
+    // sequence performs at the end (ECON1/MACON1/MACON3 over UART) is exactly
+    // the safety net for that: a transcription mistake here shows up as a
+    // wrong hex byte on the console, not a silent failure.
+    function [7:0] WCR(input [4:0] a); WCR = {3'b010, a}; endfunction
+    function [7:0] RCR(input [4:0] a); RCR = {3'b000, a}; endfunction
+
+    localparam [4:0] A_ECON1    = 5'h1F;                 // common, all banks
+    // bank 0
+    localparam [4:0] A_ETXSTL   = 5'h04, A_ETXSTH   = 5'h05;
+    localparam [4:0] A_ERXSTL   = 5'h08, A_ERXSTH   = 5'h09;
+    localparam [4:0] A_ERXNDL   = 5'h0A, A_ERXNDH   = 5'h0B;
+    localparam [4:0] A_ERXRDPTL = 5'h0C, A_ERXRDPTH = 5'h0D;
+    // bank 1
+    localparam [4:0] A_ERXFCON  = 5'h18;
+    // bank 2
+    localparam [4:0] A_MACON1   = 5'h00, A_MACON3   = 5'h02, A_MACON4 = 5'h03;
+    localparam [4:0] A_MABBIPG  = 5'h04;
+    localparam [4:0] A_MAIPGL   = 5'h06, A_MAIPGH   = 5'h07;
+    localparam [4:0] A_MAMXFLL  = 5'h0A, A_MAMXFLH  = 5'h0B;
+    // bank 3 -- MAADR file order is NOT sequential with the logical MAC
+    // address bytes; this mapping (5,6,3,4,1,2) is the documented quirk.
+    localparam [4:0] A_MAADR5   = 5'h00, A_MAADR6   = 5'h01;
+    localparam [4:0] A_MAADR3   = 5'h02, A_MAADR4   = 5'h03;
+    localparam [4:0] A_MAADR1   = 5'h04, A_MAADR2   = 5'h05;
+
+    // ------------------------------------------------------------------
+    // M2: link/MAC init sequence, run once after the first EREVID read.
+    //
+    // A flat list of SPI transactions: write (opcode, data) or read (opcode,
+    // dummy) -- which one, is decoded structurally from the opcode's own top
+    // 3 bits (000 = RCR, 010 = WCR), so no separate tag bit is needed. Bank
+    // selects are folded into the same list as ordinary WCR ECON1 writes.
+    //
+    // RX buffer 0x0000-0x19FF (6.5 KB), TX from 0x1A00, matching plan.md.
+    // ERXRDPT = ERXND = 0x19FF, which already satisfies the errata requiring
+    // an odd address (0x19FF is odd) with no extra work.
+    // MACON3 = 0x32: pad to 60B + CRC + frame-length check, HALF duplex
+    // (FULDPX=0) -- this project runs through a switch, see plan.md#duplex.
+    // MABBIPG/MAIPG values are the datasheet-recommended half-duplex set.
+    // MAC address 02:42:CE:60:00:<HOST_ID>, locally administered.
+    // Final ECON1 writes double as "select bank N" + "keep RXEN set", since
+    // RXEN and BSEL share the same register.
+    // ------------------------------------------------------------------
+    localparam integer CFG_N = 30;
+    reg [7:0] cfg_op  [0:CFG_N-1];
+    reg [7:0] cfg_dat [0:CFG_N-1];
+    integer ci;
+    initial begin
+        ci = 0;
+        // -- bank 0: RX/TX buffer pointers --
+        cfg_op[ci]=WCR(A_ECON1);    cfg_dat[ci]=8'h00; ci=ci+1; // bank 0
+        cfg_op[ci]=WCR(A_ERXSTL);   cfg_dat[ci]=8'h00; ci=ci+1;
+        cfg_op[ci]=WCR(A_ERXSTH);   cfg_dat[ci]=8'h00; ci=ci+1;
+        cfg_op[ci]=WCR(A_ERXNDL);   cfg_dat[ci]=8'hFF; ci=ci+1;
+        cfg_op[ci]=WCR(A_ERXNDH);   cfg_dat[ci]=8'h19; ci=ci+1;
+        cfg_op[ci]=WCR(A_ERXRDPTL); cfg_dat[ci]=8'hFF; ci=ci+1;
+        cfg_op[ci]=WCR(A_ERXRDPTH); cfg_dat[ci]=8'h19; ci=ci+1;
+        cfg_op[ci]=WCR(A_ETXSTL);   cfg_dat[ci]=8'h00; ci=ci+1;
+        cfg_op[ci]=WCR(A_ETXSTH);   cfg_dat[ci]=8'h1A; ci=ci+1;
+        // -- bank 1: receive filter (unicast + broadcast + CRC-valid only;
+        //    avoid the pattern-match filter per errata) --
+        cfg_op[ci]=WCR(A_ECON1);    cfg_dat[ci]=8'h01; ci=ci+1; // bank 1
+        cfg_op[ci]=WCR(A_ERXFCON);  cfg_dat[ci]=8'hA1; ci=ci+1;
+        // -- bank 2: MAC config, half duplex --
+        cfg_op[ci]=WCR(A_ECON1);    cfg_dat[ci]=8'h02; ci=ci+1; // bank 2
+        cfg_op[ci]=WCR(A_MACON1);   cfg_dat[ci]=8'h01; ci=ci+1; // MARXEN
+        cfg_op[ci]=WCR(A_MACON3);   cfg_dat[ci]=8'h32; ci=ci+1; // pad/CRC/half-dup
+        cfg_op[ci]=WCR(A_MACON4);   cfg_dat[ci]=8'h00; ci=ci+1;
+        cfg_op[ci]=WCR(A_MABBIPG);  cfg_dat[ci]=8'h12; ci=ci+1;
+        cfg_op[ci]=WCR(A_MAIPGL);   cfg_dat[ci]=8'h12; ci=ci+1;
+        cfg_op[ci]=WCR(A_MAIPGH);   cfg_dat[ci]=8'h0C; ci=ci+1;
+        cfg_op[ci]=WCR(A_MAMXFLL);  cfg_dat[ci]=8'hEE; ci=ci+1; // 1518
+        cfg_op[ci]=WCR(A_MAMXFLH);  cfg_dat[ci]=8'h05; ci=ci+1;
+        // -- bank 3: MAC address 02:42:CE:60:00:<HOST_ID> --
+        cfg_op[ci]=WCR(A_ECON1);    cfg_dat[ci]=8'h03; ci=ci+1; // bank 3
+        cfg_op[ci]=WCR(A_MAADR5);   cfg_dat[ci]=8'h00; ci=ci+1;
+        cfg_op[ci]=WCR(A_MAADR6);   cfg_dat[ci]=HOST_ID; ci=ci+1;
+        cfg_op[ci]=WCR(A_MAADR3);   cfg_dat[ci]=8'hCE; ci=ci+1;
+        cfg_op[ci]=WCR(A_MAADR4);   cfg_dat[ci]=8'h60; ci=ci+1;
+        cfg_op[ci]=WCR(A_MAADR1);   cfg_dat[ci]=8'h02; ci=ci+1;
+        cfg_op[ci]=WCR(A_MAADR2);   cfg_dat[ci]=8'h42; ci=ci+1;
+        // -- enable reception, then read back proof --
+        //
+        // MACON1/MACON3 readback was tried and dropped: this project was not
+        // supplied the ENC28J60 datasheet, and two different guesses at the
+        // MAC-register SPI read protocol (dummy byte vs. none) both produced
+        // wrong, and differently wrong, values on real hardware -- a sign
+        // something about that protocol is still misunderstood rather than
+        // something to keep guessing at. ECON1 is kept: its readback (an
+        // Ethernet-type/common register, immediate response, no dummy byte
+        // ambiguity) has been confirmed correct against real hardware twice.
+        cfg_op[ci]=WCR(A_ECON1);    cfg_dat[ci]=8'h04; ci=ci+1; // bank0, RXEN=1
+        cfg_op[ci]=RCR(A_ECON1);    cfg_dat[ci]=8'h00; ci=ci+1; // readback
+        // Leave bank 3 selected (RXEN stays set): the pre-existing periodic
+        // EREVID re-read in S_IDLE/S_RD_OP assumes bank 3 stays current
+        // forever, same as before M2 existed. Without this, that re-read
+        // silently starts reading whatever address 0x12 means in bank 2.
+        cfg_op[ci]=WCR(A_ECON1);    cfg_dat[ci]=8'h07; ci=ci+1; // bank3, RXEN=1
+        // synthesis translate_off
+        // Simulation-only: if this fires, CFG_N is out of sync with the
+        // number of entries actually written above.
+        if (ci != CFG_N)
+            $display("ERROR: eth_top cfg_op table has %0d entries, CFG_N=%0d", ci, CFG_N);
+        // synthesis translate_on
+    end
+
     // delays at 50 MHz
     localparam [19:0] T_2MS  = 20'd100_000;
     localparam [19:0] T_10MS = 20'd500_000;
@@ -90,6 +203,13 @@ module eth_top #(
     localparam S_RD_DATA    = 4'd7;
     localparam S_LATCH      = 4'd8;
     localparam S_IDLE       = 4'd9;
+    // M2: link/MAC init, ROM-driven, runs once (see S_LATCH below)
+    localparam S_M2_OP      = 4'd10;
+    localparam S_M2_OPWAIT  = 4'd11;
+    localparam S_M2_WRWAIT  = 4'd12;
+    localparam S_M2_RDWAIT  = 4'd13;
+    localparam S_M2_NEXT    = 4'd14;
+    localparam S_M2_DONE    = 4'd15;
 
     reg [3:0]  state;
     reg [22:0] wait_cnt;
@@ -97,6 +217,16 @@ module eth_top #(
     reg        enc_rst_q;
     reg [7:0]  erevid;
     reg        spi_busy_d;
+
+    reg        m2_started;          // guards the once-only M2 sequence
+    reg [5:0]  m2_idx;               // index into cfg_op/cfg_dat, 0..CFG_N-1
+    reg [7:0]  econ1_rb;             // the one register this sequence reads back
+    reg        eth_ready;            // M2 complete (level, held)
+    wire       m2_is_read = (cfg_op[m2_idx][7:5] == 3'b000);
+    // The only read left in this sequence is ECON1, an Ethernet-type/common
+    // register that returns data immediately after the opcode -- no dummy
+    // byte. MAC-type register readback was tried and dropped; see the
+    // comment above the cfg_op table.
 
     wire spi_done = spi_busy_d & ~spi_busy;   // falling edge of busy
 
@@ -108,11 +238,15 @@ module eth_top #(
         spi_start  <= 1'b0;                   // default: single-cycle pulse
 
         if (rst) begin
-            state     <= S_HW_RESET;
-            wait_cnt  <= 23'd0;
-            cs_n      <= 1'b1;
-            enc_rst_q <= 1'b0;
-            erevid    <= 8'h00;
+            state      <= S_HW_RESET;
+            wait_cnt   <= 23'd0;
+            cs_n       <= 1'b1;
+            enc_rst_q  <= 1'b0;
+            erevid     <= 8'h00;
+            m2_started <= 1'b0;
+            m2_idx     <= 6'd0;
+            econ1_rb   <= 8'h00;
+            eth_ready  <= 1'b0;
         end else begin
             case (state)
                 S_HW_RESET: begin
@@ -189,7 +323,16 @@ module eth_top #(
                 S_LATCH: begin
                     erevid   <= spi_rx;
                     wait_cnt <= 23'd0;
-                    state    <= S_IDLE;
+                    // Run the M2 link/MAC sequence exactly once, right after
+                    // the first EREVID proof. Every later visit to S_LATCH
+                    // (the periodic re-read below) just returns to S_IDLE.
+                    if (!m2_started) begin
+                        m2_started <= 1'b1;
+                        m2_idx     <= 6'd0;
+                        state      <= S_M2_OP;
+                    end else begin
+                        state <= S_IDLE;
+                    end
                 end
 
                 S_IDLE:
@@ -198,6 +341,53 @@ module eth_top #(
                         state <= S_RD_OP;
                     else
                         wait_cnt <= wait_cnt + 1'b1;
+
+                // ---- M2: walk cfg_op/cfg_dat, one SPI transaction each ----
+                S_M2_OP: begin
+                    cs_n      <= 1'b0;
+                    spi_tx    <= cfg_op[m2_idx];
+                    spi_start <= 1'b1;
+                    state     <= S_M2_OPWAIT;
+                end
+
+                S_M2_OPWAIT:
+                    if (spi_done) begin
+                        if (m2_is_read) begin
+                            spi_tx    <= 8'h00;   // clocks in the reply directly
+                            spi_start <= 1'b1;
+                            state     <= S_M2_RDWAIT;
+                        end else begin
+                            spi_tx    <= cfg_dat[m2_idx];
+                            spi_start <= 1'b1;
+                            state     <= S_M2_WRWAIT;
+                        end
+                    end
+
+                S_M2_WRWAIT:
+                    if (spi_done) begin
+                        cs_n  <= 1'b1;
+                        state <= S_M2_NEXT;
+                    end
+
+                S_M2_RDWAIT:
+                    if (spi_done) begin
+                        cs_n     <= 1'b1;
+                        econ1_rb <= spi_rx;      // the only read in this sequence
+                        state    <= S_M2_NEXT;
+                    end
+
+                S_M2_NEXT:
+                    if (m2_idx == CFG_N - 1) begin
+                        state <= S_M2_DONE;
+                    end else begin
+                        m2_idx <= m2_idx + 6'd1;
+                        state  <= S_M2_OP;
+                    end
+
+                S_M2_DONE: begin
+                    eth_ready <= 1'b1;
+                    state     <= S_IDLE;
+                end
 
                 default: state <= S_HW_RESET;
             endcase
@@ -274,10 +464,19 @@ module eth_top #(
     wire [7:0] msg_char;
     wire       msg_updated;
 
+    // Declared here, ahead of u_con's instantiation below, so nothing forces
+    // an implicit net: o_ready and oled_i2c_err are driven by u_oled further
+    // down, oled_i2c_err_sticky is set in the display-writer block below.
+    wire       o_ready;
+    wire       oled_i2c_err;
+    reg        oled_i2c_err_sticky;   // latched forever once seen; cleared only at reset
+
     uart_console #(.CLK_HZ(50_000_000), .BAUD(115200), .HOST_ID(HOST_ID)) u_con (
         .clk(clk), .rst(rst),
         .keys(keys), .keys_changed(keys_changed),
         .msg_rd_addr(msg_addr), .msg_rd_data(msg_char), .msg_updated(msg_updated),
+        .oled_ready(o_ready), .oled_nack(oled_i2c_err_sticky),
+        .eth_ready(eth_ready), .eth_econ1(econ1_rb),
         .uart_rx_pin(uart_rx), .uart_tx_pin(uart_tx)
     );
 
@@ -289,21 +488,22 @@ module eth_top #(
     reg        o_refresh;
     reg  [7:0] last_shown;
     reg        redraw_pending;
-    wire       o_ready;
 
     // Line 3 of the panel reads straight out of the console's line buffer.
     assign msg_addr = (w_addr >= 7'd63) ? (w_addr - 7'd63) : 5'd0;
 
     always @(posedge clk) begin
         if (rst) begin
-            w_addr         <= 7'd0;
-            w_en           <= 1'b0;
-            w_done         <= 1'b0;
-            o_refresh      <= 1'b0;
-            last_shown     <= 8'hFF;
-            redraw_pending <= 1'b0;
+            w_addr              <= 7'd0;
+            w_en                <= 1'b0;
+            w_done              <= 1'b0;
+            o_refresh           <= 1'b0;
+            last_shown          <= 8'hFF;
+            redraw_pending      <= 1'b0;
+            oled_i2c_err_sticky <= 1'b0;
         end else begin
             o_refresh <= 1'b0;
+            if (oled_i2c_err) oled_i2c_err_sticky <= 1'b1;
             if (!w_done) begin
                 w_en <= 1'b1;
                 case (w_addr)
@@ -353,10 +553,10 @@ module eth_top #(
         end
     end
 
-    oled_sh1106 #(.CLK_HZ(50_000_000)) u_oled (
+    oled_sh1106 #(.CLK_HZ(50_000_000), .SSD1306_COMPAT(OLED_SSD1306_COMPAT)) u_oled (
         .clk(clk), .rst(rst),
         .txt_we(w_en), .txt_addr(w_addr), .txt_char(w_char),
-        .refresh(o_refresh), .ready(o_ready), .i2c_err(),
+        .refresh(o_refresh), .ready(o_ready), .i2c_err(oled_i2c_err),
         .oled_scl(oled_scl), .oled_sda(oled_sda)
     );
 

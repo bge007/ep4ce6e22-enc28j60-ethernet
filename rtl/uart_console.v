@@ -4,6 +4,18 @@
 //   * a banner once at reset               "EP4CE6E22 node A ready"
 //   * a line whenever a button changes     "KEYS 0.2."
 //   * an echo whenever a line is received  "MSG: hello world"
+//   * "OLED READY" once, when oled_ready first asserts (proves the driver
+//     FSM completed init+clear -- this fires regardless of whether the
+//     display actually acked anything, since the FSM does not gate on it)
+//   * "OLED I2C NACK" once, if oled_nack is ever seen (the OLED never ACKed
+//     an I2C byte -- almost always wiring, power, or address, not logic)
+//   * "ETH C1=xx" once, when eth_ready first asserts -- the M2 link/MAC init
+//     readback of ECON1 (confirms RXEN got set). MACON1/MACON3 readback was
+//     tried and dropped: this project has no ENC28J60 datasheet, and two
+//     different guesses at the MAC-register SPI read protocol both produced
+//     wrong values on real hardware -- see eth_top.v's cfg_op comment. ECON1
+//     is an Ethernet-type/common register with no such ambiguity and has
+//     read back correctly against real hardware every time.
 //
 // Receives a line of printable ASCII terminated by CR or LF into a 21-character
 // buffer -- 21 because that is one OLED text line. Backspace and DEL erase.
@@ -28,6 +40,12 @@ module uart_console #(
     input  wire [4:0] msg_rd_addr,
     output wire [7:0] msg_rd_data,
     output reg        msg_updated,   // 1-cycle pulse when a line completes
+
+    input  wire       oled_ready,    // OLED driver FSM finished init + clear
+    input  wire       oled_nack,     // OLED never ACKed an I2C byte (sticky)
+
+    input  wire       eth_ready,     // M2 link/MAC init complete
+    input  wire [7:0] eth_econ1,     // ECON1 readback after RXEN set
 
     input  wire       uart_rx_pin,
     output wire       uart_tx_pin
@@ -71,11 +89,19 @@ module uart_console #(
     // ------------------------------------------------------------------
     // Transmit: banner, key state, or line echo
     // ------------------------------------------------------------------
-    localparam T_NONE = 2'd0, T_BANNER = 2'd1, T_KEYS = 2'd2, T_ECHO = 2'd3;
+    localparam T_NONE     = 3'd0, T_BANNER   = 3'd1, T_KEYS = 3'd2, T_ECHO = 3'd3,
+               T_OLED_RDY = 3'd4, T_OLED_ERR = 3'd5, T_ETH = 3'd6;
 
-    localparam integer BANNER_N = 24;
-    localparam integer KEYS_N   = 11;
-    localparam integer ECHO_N   = 5 + MSG_LEN + 2;
+    localparam integer BANNER_N   = 24;
+    localparam integer KEYS_N     = 11;
+    localparam integer ECHO_N     = 5 + MSG_LEN + 2;
+    localparam integer OLED_RDY_N = 12;   // "OLED READY\r\n"
+    localparam integer OLED_ERR_N = 15;   // "OLED I2C NACK\r\n"
+    localparam integer ETH_N      = 11;   // "ETH C1=xx\r\n"
+
+    function [7:0] hexdig(input [3:0] n);
+        hexdig = (n < 4'd10) ? (8'h30 + n) : (8'h41 + n - 4'd10);
+    endfunction
 
     reg [7:0] banner [0:BANNER_N-1];
     initial begin
@@ -87,12 +113,48 @@ module uart_console #(
         banner[20]="d"; banner[21]="y"; banner[22]=8'h0D; banner[23]=8'h0A;
     end
 
-    reg [1:0] cur;
-    reg [5:0] sidx;
-    reg       req_banner, req_keys, req_echo;
+    reg [7:0] oled_rdy_msg [0:OLED_RDY_N-1];
+    reg [7:0] oled_err_msg [0:OLED_ERR_N-1];
+    initial begin
+        oled_rdy_msg[ 0]="O"; oled_rdy_msg[ 1]="L"; oled_rdy_msg[ 2]="E"; oled_rdy_msg[ 3]="D";
+        oled_rdy_msg[ 4]=" "; oled_rdy_msg[ 5]="R"; oled_rdy_msg[ 6]="E"; oled_rdy_msg[ 7]="A";
+        oled_rdy_msg[ 8]="D"; oled_rdy_msg[ 9]="Y"; oled_rdy_msg[10]=8'h0D; oled_rdy_msg[11]=8'h0A;
 
-    wire [5:0] cur_len = (cur == T_BANNER) ? BANNER_N[5:0] :
-                         (cur == T_KEYS)   ? KEYS_N[5:0]   : ECHO_N[5:0];
+        oled_err_msg[ 0]="O"; oled_err_msg[ 1]="L"; oled_err_msg[ 2]="E"; oled_err_msg[ 3]="D";
+        oled_err_msg[ 4]=" "; oled_err_msg[ 5]="I"; oled_err_msg[ 6]="2"; oled_err_msg[ 7]="C";
+        oled_err_msg[ 8]=" "; oled_err_msg[ 9]="N"; oled_err_msg[10]="A"; oled_err_msg[11]="C";
+        oled_err_msg[12]="K"; oled_err_msg[13]=8'h0D; oled_err_msg[14]=8'h0A;
+    end
+
+    reg [2:0] cur;
+    reg [5:0] sidx;
+    reg       req_banner, req_keys, req_echo, req_oled_rdy, req_oled_err, req_eth;
+    reg       oled_ready_d, oled_nack_d, eth_ready_d;   // for edge detection
+
+    wire [5:0] cur_len = (cur == T_BANNER)   ? BANNER_N[5:0]   :
+                         (cur == T_KEYS)     ? KEYS_N[5:0]     :
+                         (cur == T_OLED_RDY) ? OLED_RDY_N[5:0] :
+                         (cur == T_OLED_ERR) ? OLED_ERR_N[5:0] :
+                         (cur == T_ETH)      ? ETH_N[5:0]      :
+                                               ECHO_N[5:0];
+
+    // "ETH C1=xx\r\n" -- ECON1 readback as hex.
+    reg [7:0] eth_byte;
+    always @(*) begin
+        case (sidx)
+            6'd0: eth_byte = "E";
+            6'd1: eth_byte = "T";
+            6'd2: eth_byte = "H";
+            6'd3: eth_byte = " ";
+            6'd4: eth_byte = "C";
+            6'd5: eth_byte = "1";
+            6'd6: eth_byte = "=";
+            6'd7: eth_byte = hexdig(eth_econ1[7:4]);
+            6'd8: eth_byte = hexdig(eth_econ1[3:0]);
+            6'd9: eth_byte = 8'h0D;
+            default: eth_byte = 8'h0A;
+        endcase
+    end
 
     // "KEYS " then one character per button: its number if pressed, '.' if not.
     reg [7:0] keys_byte;
@@ -129,19 +191,29 @@ module uart_console #(
 
     wire [7:0] send_byte = (cur == T_BANNER) ?
                              ((sidx == 6'd15) ? (8'd64 + HOST_ID) : banner[sidx[4:0]])
-                         : (cur == T_KEYS) ? keys_byte : echo_byte;
+                         : (cur == T_KEYS)     ? keys_byte
+                         : (cur == T_OLED_RDY) ? oled_rdy_msg[sidx[3:0]]
+                         : (cur == T_OLED_ERR) ? oled_err_msg[sidx[3:0]]
+                         : (cur == T_ETH)      ? eth_byte
+                                               : echo_byte;
 
     always @(posedge clk) begin
         tx_valid    <= 1'b0;
         msg_updated <= 1'b0;
 
         if (rst) begin
-            cur        <= T_NONE;
-            sidx       <= 6'd0;
-            wr_idx     <= 5'd0;
-            req_banner <= 1'b1;          // greet the terminal on power-up
-            req_keys   <= 1'b0;
-            req_echo   <= 1'b0;
+            cur          <= T_NONE;
+            sidx         <= 6'd0;
+            wr_idx       <= 5'd0;
+            req_banner   <= 1'b1;          // greet the terminal on power-up
+            req_keys     <= 1'b0;
+            req_echo     <= 1'b0;
+            req_oled_rdy <= 1'b0;
+            req_oled_err <= 1'b0;
+            req_eth      <= 1'b0;
+            oled_ready_d <= 1'b0;
+            oled_nack_d  <= 1'b0;
+            eth_ready_d  <= 1'b0;
             for (k = 0; k < MSG_LEN; k = k + 1) msg[k] <= 8'h20;
         end else begin
 
@@ -170,14 +242,26 @@ module uart_console #(
 
             if (keys_changed) req_keys <= 1'b1;
 
+            // Edge-detect the status lines: each fires exactly once.
+            oled_ready_d <= oled_ready;
+            oled_nack_d  <= oled_nack;
+            eth_ready_d  <= eth_ready;
+            if (oled_ready && !oled_ready_d) req_oled_rdy <= 1'b1;
+            if (oled_nack  && !oled_nack_d)  req_oled_err <= 1'b1;
+            if (eth_ready  && !eth_ready_d)  req_eth      <= 1'b1;
+
             // ---- transmit -----------------------------------------------
             if (cur == T_NONE) begin
                 sidx <= 6'd0;
-                // Banner first, then a received line, then key state. Key
-                // changes are the most frequent and the least urgent.
-                if      (req_banner) begin cur <= T_BANNER; req_banner <= 1'b0; end
-                else if (req_echo)   begin cur <= T_ECHO;   req_echo   <= 1'b0; end
-                else if (req_keys)   begin cur <= T_KEYS;   req_keys   <= 1'b0; end
+                // Banner first, then the M2 status (diagnostic, wanted
+                // early), then OLED status, then a received line, then key
+                // state. Key changes are the most frequent and least urgent.
+                if      (req_banner)   begin cur <= T_BANNER;   req_banner   <= 1'b0; end
+                else if (req_eth)      begin cur <= T_ETH;      req_eth      <= 1'b0; end
+                else if (req_oled_rdy) begin cur <= T_OLED_RDY; req_oled_rdy <= 1'b0; end
+                else if (req_oled_err) begin cur <= T_OLED_ERR; req_oled_err <= 1'b0; end
+                else if (req_echo)     begin cur <= T_ECHO;     req_echo     <= 1'b0; end
+                else if (req_keys)     begin cur <= T_KEYS;     req_keys     <= 1'b0; end
             end else if (tx_ready && !tx_valid) begin
                 tx_data  <= send_byte;
                 tx_valid <= 1'b1;
