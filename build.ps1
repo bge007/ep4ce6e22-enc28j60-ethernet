@@ -4,11 +4,13 @@
 #   .\build.ps1 -Sim       # simulate only
 #   .\build.ps1 -Prog      # compile + program the board over USB-Blaster
 #
-# Toolchain paths default to a stock Quartus Prime Lite 25.1 install. Override
-# on the command line or via the QUARTUS_BIN / QUESTA_BIN / OFL_EXE environment
-# variables if yours lives elsewhere:
+# Toolchain paths default to this project's dev machine layout: Quartus Prime
+# Lite 25.1 under C:\altera_lite, and openFPGALoader under
+# C:\BGE\AI\FPGA\tools. Override on the command line or via the QUARTUS_BIN /
+# QUESTA_BIN / OFL_EXE environment variables if yours lives elsewhere:
 #
 #   .\build.ps1 -QuartusBin "D:\intelFPGA_lite\23.1std\quartus\bin64"
+#   .\build.ps1 -LoaderExe  "D:\tools\openFPGALoader\openFPGALoader.exe"
 
 param(
     [switch]$Sim,
@@ -29,12 +31,18 @@ function Resolve-Tool($param, $envVar, $default) {
 
 $QUARTUS = Resolve-Tool $QuartusBin "QUARTUS_BIN" "C:\altera_lite\25.1std\quartus\bin64"
 $QUESTA  = Resolve-Tool $QuestaBin  "QUESTA_BIN"  "C:\altera_lite\25.1std\questa_fse\win64"
-$LOADER  = Resolve-Tool $LoaderExe  "OFL_EXE"     "openFPGALoader.exe"
+$LOADER  = Resolve-Tool $LoaderExe  "OFL_EXE"     "C:\BGE\AI\FPGA\tools\openFPGALoader\openFPGALoader.exe"
 
 foreach ($t in @(@{p=$QUARTUS;n="Quartus bin64"}, @{p=$QUESTA;n="Questa win64"})) {
     if (-not (Test-Path $t.p)) {
         throw "$($t.n) not found at '$($t.p)'. Pass -QuartusBin/-QuestaBin or set QUARTUS_BIN/QUESTA_BIN."
     }
+}
+
+# Only checked when actually programming: a full path can be validated up
+# front, unlike a bare "openFPGALoader.exe" which depends on PATH at call time.
+if ($Prog -and -not (Test-Path $LOADER)) {
+    throw "openFPGALoader not found at '$LOADER'. Pass -LoaderExe or set OFL_EXE."
 }
 
 $root = $PSScriptRoot
