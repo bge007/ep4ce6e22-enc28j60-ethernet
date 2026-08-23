@@ -16,11 +16,7 @@
 
 module eth_top #(
     // 1 = Host A (192.168.1.60), 2 = Host B (192.168.1.61). Build twice.
-    parameter [7:0]  HOST_ID = 8'd1,
-    // Diagnostic escape hatch -- see oled_sh1106.v's SSD1306_COMPAT comment.
-    // Set to 1 if the OLED never lights despite clean I2C ACKs, to rule out
-    // an SH1106/SSD1306 chip mislabelling on the physical module.
-    parameter integer OLED_SSD1306_COMPAT = 0
+    parameter [7:0]  HOST_ID = 8'd1
 ) (
     input  wire       clk,        // 50 MHz
     input  wire       nrst,       // board reset button, active low
@@ -34,7 +30,7 @@ module eth_top #(
     input  wire       enc_miso,
     input  wire       enc_int,    // unused in M1
 
-    inout  wire       oled_scl,   // 1.3" SH1106 OLED, I2C
+    inout  wire       oled_scl,   // 1.3" SSD1306 OLED, I2C
     inout  wire       oled_sda,
 
     output wire       uart_tx,    // to CH340 -> USB COM port
@@ -437,7 +433,7 @@ module eth_top #(
                          : ~erevid[4:0];    // normal: lower 5 bits (0x06)
 
     // ------------------------------------------------------------------
-    // 1.3" SH1106 OLED status display
+    // 1.3" SSD1306 OLED status display
     //
     //   line 0   EP4CE6E22 ENC28J60
     //   line 1   EREVID 0xNN OK|BAD
@@ -589,7 +585,7 @@ module eth_top #(
         end
     end
 
-    oled_sh1106 #(.CLK_HZ(50_000_000), .SSD1306_COMPAT(OLED_SSD1306_COMPAT)) u_oled (
+    oled_ssd1306 #(.CLK_HZ(50_000_000)) u_oled (
         .clk(clk), .rst(rst),
         .txt_we(w_en), .txt_addr(w_addr), .txt_char(w_char),
         .refresh(o_refresh), .ready(o_ready), .i2c_err(oled_i2c_err),

@@ -1,21 +1,21 @@
-// tb_oled.v -- self-checking testbench for oled_sh1106 + i2c_master against a
-// behavioural SH1106 I2C slave.
+// tb_oled.v -- self-checking testbench for oled_ssd1306 + i2c_master against a
+// behavioural SSD1306 I2C slave.
 //
 // What it proves:
 //   * the slave address byte is 0x78 (7-bit 0x3C, write)
 //   * the datasheet init sequence is delivered, in order
-//   * the charge pump is set to internal DC-DC (0xAD 0x8B), not 0x8A
-//   * EVERY page sets column low = 0x02 and high = 0x10 -- the SH1106 offset
+//   * the charge pump is set to 0x8D 0x14 (internal DC-DC enable)
+//   * EVERY page sets column low = 0x00 and high = 0x10 -- no RAM offset
 //   * all eight pages are addressed 0xB0..0xB7 and each receives 128 bytes
 //   * 0xAF is sent only after the clear pass, so noise is never displayed
 //   * text written to the buffer reaches the panel as the right glyph bytes
 //
-// Run:  vlog -sv ../rtl/i2c_master.v ../rtl/oled_sh1106.v ../tb/tb_oled.v
+// Run:  vlog -sv ../rtl/i2c_master.v ../rtl/oled_ssd1306.v ../tb/tb_oled.v
 //       vsim -c -do "run -all; quit -f" tb_oled
 
 `timescale 1ns/1ps
 
-module sh1106_model (
+module ssd1306_model (
     input wire scl,
     input wire sda_line,
     output wire sda_drive_low
@@ -39,6 +39,7 @@ module sh1106_model (
     integer   data_count [0:7];
     integer   cur_page;
     reg [7:0] last_page_cmd;
+    integer   since_page_cmd;   // bytes seen since the last 0xBx: 1=lower col, 2=higher col
     integer   col_lo_ok, col_hi_ok, page_cmd_n;
     reg       seen_af;
     reg       af_before_clear;
@@ -49,6 +50,7 @@ module sh1106_model (
     initial begin
         ack_low = 0; nbits = 0; byte_idx = 0; in_frame = 0; in_ack = 0;
         is_data_stream = 0; cmd_n = 0; cur_page = 0;
+        since_page_cmd = 1000;
         col_lo_ok = 0; col_hi_ok = 0; page_cmd_n = 0;
         seen_af = 0; af_before_clear = 0; total_pages_done = 0; p0i = 0;
         for (byte_idx = 0; byte_idx < 8; byte_idx = byte_idx + 1) data_count[byte_idx] = 0;
@@ -104,13 +106,24 @@ module sh1106_model (
                 end else begin
                     cmd_log[cmd_n] = shifter; cmd_n = cmd_n + 1;
                     if (shifter[7:4] == 4'hB) begin
-                        cur_page   = shifter[2:0];
-                        page_cmd_n = page_cmd_n + 1;
-                        last_page_cmd = shifter;
+                        cur_page       = shifter[2:0];
+                        page_cmd_n     = page_cmd_n + 1;
+                        last_page_cmd  = shifter;
+                        since_page_cmd = 0;
+                    end else begin
+                        since_page_cmd = since_page_cmd + 1;
+                        // the two bytes immediately after a page command must
+                        // be the lower then higher column address -- checked
+                        // by position, not by value: 0x00 (SSD1306's lower
+                        // column, no RAM offset) also appears elsewhere in the
+                        // init table (e.g. the display-offset value after
+                        // 0xD3), so matching by value alone over-counts.
+                        if (since_page_cmd == 1) begin
+                            if (shifter == 8'h00) col_lo_ok = col_lo_ok + 1;
+                        end else if (since_page_cmd == 2) begin
+                            if (shifter == 8'h10) col_hi_ok = col_hi_ok + 1;
+                        end
                     end
-                    // the two bytes after a page command must be 0x02 then 0x10
-                    if (shifter == 8'h02 && last_page_cmd[7:4] == 4'hB) col_lo_ok = col_lo_ok + 1;
-                    if (shifter == 8'h10 && last_page_cmd[7:4] == 4'hB) col_hi_ok = col_hi_ok + 1;
                     if (shifter == 8'hAF) begin
                         seen_af = 1;
                         if (total_pages_done < 8) af_before_clear = 1;
@@ -154,7 +167,7 @@ module tb_oled;
     wire       ready, i2c_err;
 
     // POR shortened so the sim is seconds, not minutes.
-    oled_sh1106 #(.CLK_HZ(50_000_000), .POR_TICKS(200)) dut (
+    oled_ssd1306 #(.CLK_HZ(50_000_000), .POR_TICKS(200)) dut (
         .clk(clk), .rst(rst),
         .txt_we(txt_we), .txt_addr(txt_addr), .txt_char(txt_char),
         .refresh(refresh), .ready(ready), .i2c_err(i2c_err),
@@ -162,24 +175,23 @@ module tb_oled;
     );
 
     wire model_pulls_low;
-    sh1106_model model (.scl(scl), .sda_line(sda), .sda_drive_low(model_pulls_low));
+    ssd1306_model model (.scl(scl), .sda_line(sda), .sda_drive_low(model_pulls_low));
     assign sda = model_pulls_low ? 1'b0 : 1'bz;
 
     integer errors = 0;
     integer i;
 
-    // expected init table (datasheet 4.4, charge pump 0x8B)
-    reg [7:0] expect_init [0:25];
+    // expected init table (standard SSD1306 order, charge pump 0x8D 0x14)
+    reg [7:0] expect_init [0:23];
     initial begin
-        expect_init[ 0]=8'hAE; expect_init[ 1]=8'h02; expect_init[ 2]=8'h10;
+        expect_init[ 0]=8'hAE; expect_init[ 1]=8'h00; expect_init[ 2]=8'h10;
         expect_init[ 3]=8'h40; expect_init[ 4]=8'hB0; expect_init[ 5]=8'h81;
         expect_init[ 6]=8'hBF; expect_init[ 7]=8'hA1; expect_init[ 8]=8'hA6;
-        expect_init[ 9]=8'hA8; expect_init[10]=8'h3F; expect_init[11]=8'hAD;
-        expect_init[12]=8'h8B; expect_init[13]=8'h32; expect_init[14]=8'hC8;
-        expect_init[15]=8'hD3; expect_init[16]=8'h00; expect_init[17]=8'hD5;
-        expect_init[18]=8'h80; expect_init[19]=8'hD9; expect_init[20]=8'h22;
-        expect_init[21]=8'hDA; expect_init[22]=8'h12; expect_init[23]=8'hDB;
-        expect_init[24]=8'h40;
+        expect_init[ 9]=8'hA8; expect_init[10]=8'h3F; expect_init[11]=8'h8D;
+        expect_init[12]=8'h14; expect_init[13]=8'hC8; expect_init[14]=8'hD3;
+        expect_init[15]=8'h00; expect_init[16]=8'hD5; expect_init[17]=8'h80;
+        expect_init[18]=8'hD9; expect_init[19]=8'h22; expect_init[20]=8'hDA;
+        expect_init[21]=8'h12; expect_init[22]=8'hDB; expect_init[23]=8'h40;
     end
 
     task check(input cond, input [255:0] msg);
@@ -223,22 +235,22 @@ module tb_oled;
         // ---------------- checks ----------------
         check(model.addr_byte == 8'h78, "slave address byte is not 0x78");
 
-        for (i = 0; i < 25; i = i + 1)
+        for (i = 0; i < 24; i = i + 1)
             if (model.cmd_log[i] !== expect_init[i]) begin
                 $display("FAIL: init byte %0d is 0x%02h, expected 0x%02h",
                          i, model.cmd_log[i], expect_init[i]);
                 errors = errors + 1;
             end
 
-        check(model.cmd_log[11] == 8'hAD && model.cmd_log[12] == 8'h8B,
-              "charge pump is not 0xAD 0x8B (internal DC-DC)");
+        check(model.cmd_log[11] == 8'h8D && model.cmd_log[12] == 8'h14,
+              "charge pump is not 0x8D 0x14 (internal DC-DC enable)");
 
         // 8 pages cleared + 8 pages painted = 16 page-setup transactions.
         // page_cmd_n is larger than that because the init table also contains
         // a 0xB0, so compare the column counts against 16 rather than against
         // page_cmd_n.
         if (model.col_lo_ok != 16) begin
-            $display("FAIL: lower column set to 0x02 on %0d of 16 pages -- SH1106 offset missing",
+            $display("FAIL: lower column set to 0x00 on %0d of 16 pages",
                      model.col_lo_ok);
             errors = errors + 1;
         end
@@ -275,7 +287,7 @@ module tb_oled;
         check(model.page0_bytes[20] == 8'h00, "column past end of text is not blank");
 
         if (errors == 0)
-            $display("PASS: SH1106 init, 0x02/0x10 column offset on all %0d pages, 8 pages painted, text rendered",
+            $display("PASS: SSD1306 init, 0x00/0x10 column addressing on all %0d pages, 8 pages painted, text rendered",
                      model.page_cmd_n);
         else
             $display("%0d ERROR(S)", errors);

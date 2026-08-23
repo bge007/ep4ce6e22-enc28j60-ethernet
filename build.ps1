@@ -84,7 +84,7 @@ if (-not $Prog) {
     # $readmemh resolves relative to the simulation working directory.
     Copy-Item ..\rtl\font5x8.mem . -Force
 
-    vlog -sv ../rtl/spi_master.v ../rtl/i2c_master.v ../rtl/oled_sh1106.v `
+    vlog -sv ../rtl/spi_master.v ../rtl/i2c_master.v ../rtl/oled_ssd1306.v `
              ../rtl/uart_tx.v ../rtl/uart_rx.v ../rtl/uart_console.v `
              ../rtl/debounce.v ../rtl/net_stack.v ../rtl/eth_top.v `
              ../tb/tb_m1.v ../tb/tb_m2.v ../tb/tb_m3.v ../tb/tb_oled.v ../tb/tb_uart.v

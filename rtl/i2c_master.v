@@ -1,6 +1,6 @@
 // i2c_master.v -- minimal single-master I2C, write-only, open-drain.
 //
-// Enough for the SH1106 OLED and nothing more: the display is write-only, so
+// Enough for the SSD1306 OLED and nothing more: the display is write-only, so
 // there is no read path, and it never stretches the clock, so there is no
 // stretch handling. SCL is released rather than driven high, as I2C requires;
 // the module's own 4.7k pull-ups do the rest.

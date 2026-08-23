@@ -44,19 +44,20 @@ are all simultaneously working.
 
 | | |
 |---|---|
-| Simulation | Passes — five self-checking testbenches, against behavioral ENC28J60 models (SPI with per-bank registers for M2; full 8 KB buffer memory with RBM/WBM pointer emulation for M3's ARP responder) and SH1106 (I²C) plus a UART loopback |
+| Simulation | Passes — five self-checking testbenches, against behavioral ENC28J60 models (SPI with per-bank registers for M2; full 8 KB buffer memory with RBM/WBM pointer emulation for M3's ARP responder) and SSD1306 (I²C) plus a UART loopback |
 | Quartus compile | 0 errors |
 | Logic elements | 2,176 / 6,272 (35%) |
 | Worst-case setup slack | +7.85 ns |
 | Worst-case hold slack | +0.19 ns |
 | Hardware | M1 confirmed, M2's RXEN confirmed (`ECON1` readback), M3 flashed to Host A — `ping` retest pending |
 
-**The OLED display also works.** Each node drives a 1.3" 128×64 SH1106 panel
+**The OLED display also works.** Each node drives a 1.3" 128×64 SSD1306 panel
 over I²C showing the board identity, the live EREVID readback, the host's IP,
 and a message line. Line 3 is the hook for milestone 4: Host A will write what
 it transmits, Host B what it receives. See [docs/oled.md](docs/oled.md) —
 including the two traps, powering it at 3.3 V rather than the 5 V on the
-silkscreen, the SH1106's two-column RAM offset, and a
+silkscreen and the panel's mislabelled datasheet (packaged as "SH1106", real
+silicon confirmed SSD1306), plus a
 [reset-button gotcha](docs/oled.md#troubleshooting-panel-blank-after-power-up-despite-clean-ic)
 seen on real hardware after reflashing.
 
@@ -98,7 +99,7 @@ figures in USD to give a sense of scale — they are not quotes and they drift.
 |---|---|---|---|---|
 | 1 | EP4CE6E22 Cyclone IV E core board | 1 | `EP4CE6E22C8N`, 144-LQFP, onboard CH340 + USB-C, 5 LEDs, 4 keys, 50 MHz osc | 12–20 |
 | 2 | ENC28J60 Ethernet module | 1 | **must** carry the RJ45 jack with integrated magnetics (HanRun `HR911105A` or equivalent) and a 25 MHz crystal; **3.3 V logic** | 3–6 |
-| 3 | 1.3" I²C OLED, 128×64 | 1 | 4-pin (VCC/GND/SCL/SDA). Controller is **SH1106**, panel QG-2864KSWLG01. **Run it at 3.3 V — see the warning below** | 4–8 |
+| 3 | 1.3" I²C OLED, 128×64 | 1 | 4-pin (VCC/GND/SCL/SDA). Controller is **SSD1306** (the panel's own datasheet mislabels it SH1106 — see [docs/oled.md](docs/oled.md)), panel QG-2864KSWLG01. **Run it at 3.3 V — see the warning below** | 4–8 |
 | 4 | USB-C cable | 1 | data-capable, not charge-only — it carries power *and* the CH340 serial port | 2–4 |
 | 5 | 100 nF ceramic capacitor | 1 | decoupling across the ENC28J60's VCC/GND, as close to the header as you can get | <1 |
 | 6 | 10 µF capacitor | 1 | same place; ceramic or electrolytic both fine | <1 |
@@ -163,8 +164,8 @@ Rough total for a complete two-node build: **$65–115**.
 5. **The OLED is sold as a 5 V module — run it at 3.3 V anyway.** Its SDA and
    SCL pull-ups go to its own VCC, so powering it at 5 V puts 5 V on the I²C
    lines and straight into a 3.3 V FPGA bank. At 3.3 V the pull-ups are 3.3 V
-   and everything is safe, which is also what the SH1106 wants — the datasheet
-   gives VDD as 1.65–3.3 V. Measure SDA and SCL against ground before
+   and everything is safe, which is also what the SSD1306 wants — VDD is
+   1.65–3.3 V. Measure SDA and SCL against ground before
    connecting them. Details in [docs/oled.md](docs/oled.md).
 
 ### Building with only one FPGA board
@@ -184,17 +185,20 @@ straight-through cable to a PC just works.
 |---|---|
 | [`rtl/spi_master.v`](rtl/spi_master.v) | Byte-streaming SPI master, mode 0, burst-capable |
 | [`rtl/i2c_master.v`](rtl/i2c_master.v) | Write-only open-drain I²C master, 400 kHz |
-| [`rtl/oled_sh1106.v`](rtl/oled_sh1106.v) | SH1106 OLED driver: init, page addressing, 4×21 text |
+| [`rtl/oled_ssd1306.v`](rtl/oled_ssd1306.v) | SSD1306 OLED driver: init, page addressing, 4×21 text |
 | [`rtl/font5x8.mem`](rtl/font5x8.mem) | ASCII 32–126 font, generated — don't hand-edit |
 | [`rtl/uart_tx.v`](rtl/uart_tx.v), [`rtl/uart_rx.v`](rtl/uart_rx.v) | 8N1 UART at 115200 |
 | [`rtl/uart_console.v`](rtl/uart_console.v) | Banner, key lines, received-line buffer, echo |
 | [`rtl/debounce.v`](rtl/debounce.v) | Four button debouncers with press/release pulses |
+| [`rtl/net_stack.v`](rtl/net_stack.v) | M3: ARP responder, RX/TX engine over the ENC28J60 buffer |
 | [`rtl/eth_top.v`](rtl/eth_top.v) | Top level: EREVID read, LEDs, OLED, buttons, console |
 | [`tb/tb_m1.v`](tb/tb_m1.v) | Self-checking testbench + behavioral ENC28J60 SPI-slave model |
-| [`tb/tb_oled.v`](tb/tb_oled.v) | Self-checking testbench + behavioral SH1106 I²C slave model |
+| [`tb/tb_m2.v`](tb/tb_m2.v) | Self-checking testbench + per-bank ENC28J60 register model (M2) |
+| [`tb/tb_m3.v`](tb/tb_m3.v) | Self-checking testbench + full-buffer ENC28J60 model (M3 ARP) |
+| [`tb/tb_oled.v`](tb/tb_oled.v) | Self-checking testbench + behavioral SSD1306 I²C slave model |
 | [`tb/tb_uart.v`](tb/tb_uart.v) | Self-checking UART loopback and console testbench |
 | [`pc/serial-monitor.ps1`](pc/serial-monitor.ps1) | PowerShell terminal for the board's COM port |
-| [`docs/oled.md`](docs/oled.md) | SH1106 column offset, the 3.3 V warning, driver internals |
+| [`docs/oled.md`](docs/oled.md) | SSD1306 vs. the mislabelled datasheet, the 3.3 V warning, driver internals |
 | [`docs/serial-console.md`](docs/serial-console.md) | UART pins, buttons, PowerShell usage |
 | [`tools/`](tools/) | Generators for the font and the wiring diagram |
 | [`docs/plan.md`](docs/plan.md) | Design rationale, throughput budget, milestones, errata list |
@@ -301,7 +305,7 @@ and throughput that collapses under load.
 | | Milestone | Exit criterion | State |
 |---|---|---|---|
 | M1 | SPI alive — `spi_master`, EREVID readback | `0x06` on the LEDs | Simulated ✓, hardware ✓ (Host A) |
-| M1.5 | OLED — I²C master, SH1106 driver, status text | Status text on the panel | Simulated ✓, hardware ✓ (Host A — see [docs/oled.md](docs/oled.md#troubleshooting-panel-blank-after-power-up-despite-clean-ic) for a reset-button gotcha) |
+| M1.5 | OLED — I²C master, SSD1306 driver, status text | Status text on the panel | Simulated ✓, hardware ✓ (Host A — see [docs/oled.md](docs/oled.md#troubleshooting-panel-blank-after-power-up-despite-clean-ic) for the controller-ID and reset-button gotchas) |
 | M1.6 | Console — UART, buttons, typed message to OLED | Type in PowerShell, see it on the panel | Simulated ✓, hardware ✓ (Host A, byte-perfect round trip) |
 | M2 | Link up — RX/TX buffer, MAC filter, MAC config, MAC address, RXEN | Link LED on both boards | RXEN confirmed on hardware ✓ (Host A), link LED pending |
 | M3 | Ping — ARP responder (ICMP echo deferred to M4) | `ping` moves from "unreachable" to "timed out" | Simulated ✓, flashed to Host A, hardware retest pending |
@@ -346,7 +350,7 @@ Quartus docs:
 MIT — see [LICENSE](LICENSE). This covers the source code and the written
 documentation.
 
-The board photographs and the SH1106 panel datasheet in [`docs/`](docs/) are
+The board photographs and the panel datasheet in [`docs/`](docs/) are
 vendor product, manual and datasheet material, included for reference and
 identification. They are not original work of this project and are not covered
 by the MIT licence — see [Image credits](docs/wiring.md#image-credits).
