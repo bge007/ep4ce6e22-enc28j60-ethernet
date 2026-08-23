@@ -38,7 +38,16 @@ module net_stack #(
 
     // Diagnostics (all level/sticky, read by uart_console)
     output reg  [15:0] frames_seen,
-    output reg  [15:0] arp_replies_sent
+    output reg  [15:0] arp_replies_sent,
+    // EIR/ESTAT read back right after every TX attempt (both common,
+    // bank-independent registers -- same simple immediate-RCR protocol
+    // already confirmed correct for ECON1/EPKTCNT, unlike the MAC-type
+    // register readback this project gave up on). Raw bytes, deliberately
+    // not decoded here: real hardware data to look at while diagnosing why
+    // a transmitted ARP reply never reaches the far end despite net_stack's
+    // own TXRTS-and-wait logic believing it succeeded every time.
+    output reg  [7:0]   last_eir,
+    output reg  [7:0]   last_estat
 );
 
     // ------------------------------------------------------------------
@@ -51,6 +60,7 @@ module net_stack #(
     localparam [7:0] OP_WBM = 8'h7A;
 
     localparam [4:0] A_ECON1   = 5'h1F, A_ECON2 = 5'h1E;   // common
+    localparam [4:0] A_EIR     = 5'h1C, A_ESTAT = 5'h1D;   // common -- diagnostic only
     localparam [4:0] A_ERDPTL  = 5'h00, A_ERDPTH = 5'h01;  // bank 0
     localparam [4:0] A_EWRPTL  = 5'h02, A_EWRPTH = 5'h03;
     localparam [4:0] A_ETXNDL  = 5'h06, A_ETXNDH = 5'h07;
@@ -92,24 +102,28 @@ module net_stack #(
     // ------------------------------------------------------------------
     // FSM
     // ------------------------------------------------------------------
-    localparam S_INIT0      = 5'd0,  S_INIT1      = 5'd1,
-               S_POLL       = 5'd2,  S_POLL_WAIT  = 5'd3,  S_POLL_CHECK = 5'd4,
-               S_SETRDPT0   = 5'd5,  S_SETRDPT1   = 5'd6,  S_SETRDPT2   = 5'd7,
-               S_RBM_OP     = 5'd8,  S_RBM_OPWAIT = 5'd9,
-               S_RBM_HDR_GO = 5'd10, S_RBM_HDR_WT = 5'd11,
-               S_RBM_BOD_GO = 5'd12, S_RBM_BOD_WT = 5'd13,
-               S_TX_BANK    = 5'd14, S_SETWRPT0   = 5'd15, S_SETWRPT1   = 5'd16,
-               S_WBM_OP     = 5'd17, S_WBM_OPWAIT = 5'd18,
-               S_WBM_BOD_GO = 5'd19, S_WBM_BOD_WT = 5'd20,
-               S_SETETXND0  = 5'd21, S_SETETXND1  = 5'd22,
-               S_TXRTS      = 5'd23, S_TXWAIT     = 5'd24,
-               S_CLEANUP0   = 5'd25, S_CLEANUP1   = 5'd26, S_CLEANUP2   = 5'd27,
-               S_CLEANUP3   = 5'd28, S_CLEANUP4   = 5'd29,
-               S_WCR_OP     = 5'd30, S_WCR_DATA   = 5'd31; // generic 1-shot WCR
+    localparam S_INIT0      = 6'd0,  S_INIT1      = 6'd1,
+               S_POLL       = 6'd2,  S_POLL_WAIT  = 6'd3,  S_POLL_CHECK = 6'd4,
+               S_SETRDPT0   = 6'd5,  S_SETRDPT1   = 6'd6,  S_SETRDPT2   = 6'd7,
+               S_RBM_OP     = 6'd8,  S_RBM_OPWAIT = 6'd9,
+               S_RBM_HDR_GO = 6'd10, S_RBM_HDR_WT = 6'd11,
+               S_RBM_BOD_GO = 6'd12, S_RBM_BOD_WT = 6'd13,
+               S_TX_BANK    = 6'd14, S_SETWRPT0   = 6'd15, S_SETWRPT1   = 6'd16,
+               S_WBM_OP     = 6'd17, S_WBM_OPWAIT = 6'd18,
+               S_WBM_BOD_GO = 6'd19, S_WBM_BOD_WT = 6'd20,
+               S_SETETXND0  = 6'd21, S_SETETXND1  = 6'd22,
+               S_TXRTS      = 6'd23, S_TXWAIT     = 6'd24,
+               S_CLEANUP0   = 6'd25, S_CLEANUP1   = 6'd26, S_CLEANUP2   = 6'd27,
+               S_CLEANUP3   = 6'd28, S_CLEANUP4   = 6'd29,
+               S_WCR_OP     = 6'd30, S_WCR_DATA   = 6'd31, // generic 1-shot WCR
+               S_RCR_OP     = 6'd32, S_RCR_WAIT   = 6'd33, // generic 1-shot RCR
+               S_RD_EIR_GO  = 6'd34, S_RD_ESTAT_GO = 6'd35; // TX diagnostic readback
 
-    reg [4:0]  state, ret_state;    // ret_state: where the generic WCR returns to
+    reg [5:0]  state, ret_state;    // ret_state: where the generic WCR/RCR returns to
     reg [4:0]  wcr_addr;
     reg [7:0]  wcr_data;
+    reg [4:0]  rcr_addr;
+    reg [7:0]  rcr_rb;              // generic RCR's captured byte
     reg [26:0] wait_cnt;
 
     // One TX byte, addressed by txpos, for the 42-byte ARP reply (43 with
@@ -185,6 +199,8 @@ module net_stack #(
             wait_cnt         <= 0;
             frames_seen      <= 16'd0;
             arp_replies_sent <= 16'd0;
+            last_eir         <= 8'd0;
+            last_estat       <= 8'd0;
         end else if (!start && state == S_INIT0) begin
             // idle until eth_top hands off the bus
         end else begin
@@ -413,16 +429,37 @@ module net_stack #(
                     if (wait_cnt == 27'd25_000) begin
                         wait_cnt         <= 0;
                         arp_replies_sent <= arp_replies_sent + 16'd1;
-                        state            <= S_CLEANUP1;
+                        state            <= S_RD_EIR_GO;
                     end else begin
                         wait_cnt <= wait_cnt + 1'b1;
                     end
 
+                // ---- diagnostic: what does the hardware itself think happened? ----
+                S_RD_EIR_GO: begin
+                    rcr_addr  <= A_EIR;
+                    ret_state <= S_RD_ESTAT_GO;
+                    state     <= S_RCR_OP;
+                end
+                S_RD_ESTAT_GO: begin
+                    last_eir  <= rcr_rb;
+                    rcr_addr  <= A_ESTAT;
+                    ret_state <= S_CLEANUP1;
+                    state     <= S_RCR_OP;
+                end
+
                 // ---- free the RX buffer space, decrement EPKTCNT ----
+                // last_estat capture belongs here, not a dedicated state: this
+                // is where control lands right after the ESTAT RCR above (via
+                // ret_state), and non-ARP-reply frames (which skip TX/the EIR
+                // read entirely) also pass through here on every packet, so
+                // gating the capture on "did we just do a TX" would need its
+                // own extra state for no real benefit -- rcr_rb simply holds
+                // stale data on those frames instead of a fresh ESTAT value.
                 S_CLEANUP1: begin
-                    wcr_addr  <= A_ECON1; wcr_data <= 8'h00;    // bank 0
-                    ret_state <= S_CLEANUP2;
-                    state     <= S_WCR_OP;
+                    last_estat <= rcr_rb;
+                    wcr_addr   <= A_ECON1; wcr_data <= 8'h00;    // bank 0
+                    ret_state  <= S_CLEANUP2;
+                    state      <= S_WCR_OP;
                 end
                 S_CLEANUP2: begin
                     wcr_addr  <= A_ERXRDPTL; wcr_data <= next_erxrdpt[7:0];
@@ -463,6 +500,25 @@ module net_stack #(
                         end else begin
                             cs_n  <= 1'b1;
                             state <= ret_state;
+                        end
+                    end
+
+                // ---- generic single RCR of a common/bank-independent
+                // register, returns to ret_state with the byte in rcr_rb ----
+                S_RCR_OP: begin
+                    cs_n      <= 1'b0;
+                    spi_tx    <= RCR(rcr_addr);
+                    spi_start <= 1'b1;
+                    state     <= S_RCR_WAIT;
+                end
+                S_RCR_WAIT:
+                    if (spi_done) begin
+                        if (spi_tx == RCR(rcr_addr)) begin
+                            spi_tx <= 8'h00; spi_start <= 1'b1;   // clock in the byte
+                        end else begin
+                            cs_n   <= 1'b1;
+                            rcr_rb <= spi_rx;
+                            state  <= ret_state;
                         end
                     end
 

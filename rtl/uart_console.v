@@ -57,6 +57,8 @@ module uart_console #(
 
     input  wire [15:0] net_frames,   // M3: frames seen by net_stack
     input  wire [15:0] net_replies,  // M3: ARP replies sent
+    input  wire [7:0]  net_eir,      // EIR readback after the last TX attempt
+    input  wire [7:0]  net_estat,    // ESTAT readback after the last TX attempt
 
     input  wire       uart_rx_pin,
     output wire       uart_tx_pin
@@ -109,7 +111,7 @@ module uart_console #(
     localparam integer OLED_RDY_N = 12;   // "OLED READY\r\n"
     localparam integer OLED_ERR_N = 15;   // "OLED I2C NACK\r\n"
     localparam integer ETH_N      = 11;   // "ETH C1=xx\r\n"
-    localparam integer NET_N      = 19;   // "NET F=xxxx R=xxxx\r\n"
+    localparam integer NET_N      = 29;   // "NET F=xxxx R=xxxx E=xx S=xx\r\n"
 
     function [7:0] hexdig(input [3:0] n);
         hexdig = (n < 4'd10) ? (8'h30 + n) : (8'h41 + n - 4'd10);
@@ -170,7 +172,12 @@ module uart_console #(
         endcase
     end
 
-    // "NET F=xxxx R=xxxx\r\n" -- M3's frame/ARP-reply counters, hex.
+    // "NET F=xxxx R=xxxx E=xx S=xx\r\n" -- M3's frame/ARP-reply counters,
+    // plus the raw EIR/ESTAT bytes read back after the last TX attempt
+    // (common/bank-independent registers, same proven RCR protocol as
+    // ECON1/EPKTCNT -- real hardware data on whether the ENC28J60 itself
+    // believes a transmission succeeded, since net_stack's own TXRTS-and-
+    // wait logic never checks).
     reg [7:0] net_byte;
     always @(*) begin
         case (sidx)
@@ -191,7 +198,17 @@ module uart_console #(
             6'd14: net_byte = hexdig(net_replies[11:8]);
             6'd15: net_byte = hexdig(net_replies[7:4]);
             6'd16: net_byte = hexdig(net_replies[3:0]);
-            6'd17: net_byte = 8'h0D;
+            6'd17: net_byte = " ";
+            6'd18: net_byte = "E";
+            6'd19: net_byte = "=";
+            6'd20: net_byte = hexdig(net_eir[7:4]);
+            6'd21: net_byte = hexdig(net_eir[3:0]);
+            6'd22: net_byte = " ";
+            6'd23: net_byte = "S";
+            6'd24: net_byte = "=";
+            6'd25: net_byte = hexdig(net_estat[7:4]);
+            6'd26: net_byte = hexdig(net_estat[3:0]);
+            6'd27: net_byte = 8'h0D;
             default: net_byte = 8'h0A;
         endcase
     end

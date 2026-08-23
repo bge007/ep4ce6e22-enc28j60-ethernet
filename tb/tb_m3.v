@@ -138,11 +138,14 @@ module tb_m3;
     localparam [47:0] OUR_MAC = 48'h02_42_CE_60_00_01;
     localparam [31:0] OUR_IP  = 32'hC0_A8_01_3C;   // 192.168.1.60
 
+    wire [7:0] last_eir, last_estat;   // TX diagnostic readback, unused in this tb
+
     net_stack #(.OUR_MAC(OUR_MAC), .OUR_IP(OUR_IP)) dut (
         .clk(clk), .rst(rst), .start(start),
         .cs_n(cs_n), .spi_start(spi_start), .spi_tx(spi_tx),
         .spi_rx(spi_rx), .spi_busy(spi_busy),
-        .frames_seen(frames_seen), .arp_replies_sent(arp_replies_sent)
+        .frames_seen(frames_seen), .arp_replies_sent(arp_replies_sent),
+        .last_eir(last_eir), .last_estat(last_estat)
     );
 
     // spi_master itself has no chip-select notion (matching eth_top.v's

@@ -67,6 +67,7 @@ module eth_top #(
     wire        net_cs_n, net_spi_start;
     wire [7:0]  net_spi_tx;
     wire [15:0] eth_frames_seen, eth_arp_replies;
+    wire [7:0]  eth_last_eir, eth_last_estat;
 
     wire        mux_cs_n      = eth_ready ? net_cs_n      : m12_cs_n;
     wire        mux_spi_start = eth_ready ? net_spi_start : m12_spi_start;
@@ -91,7 +92,8 @@ module eth_top #(
         .clk(clk), .rst(rst), .start(eth_ready),
         .cs_n(net_cs_n), .spi_start(net_spi_start), .spi_tx(net_spi_tx),
         .spi_rx(spi_rx), .spi_busy(spi_busy),
-        .frames_seen(eth_frames_seen), .arp_replies_sent(eth_arp_replies)
+        .frames_seen(eth_frames_seen), .arp_replies_sent(eth_arp_replies),
+        .last_eir(eth_last_eir), .last_estat(eth_last_estat)
     );
 
     assign enc_cs_n = mux_cs_n;
@@ -143,9 +145,24 @@ module eth_top #(
     // RX buffer 0x0000-0x19FF (6.5 KB), TX from 0x1A00, matching plan.md.
     // ERXRDPT = ERXND = 0x19FF, which already satisfies the errata requiring
     // an odd address (0x19FF is odd) with no extra work.
-    // MACON3 = 0x32: pad to 60B + CRC + frame-length check, HALF duplex
-    // (FULDPX=0) -- this project runs through a switch, see plan.md#duplex.
-    // MABBIPG/MAIPG values are the datasheet-recommended half-duplex set.
+    // MACON3 = 0x33: pad to 60B + CRC + frame-length check, FULL duplex
+    // (FULDPX=1). Originally shipped as half duplex (0x32) on the theory that
+    // leaving PHCON1 untouched would leave the PHY at a matching default --
+    // but this project has no ENC28J60 datasheet to confirm that default,
+    // and M3 hardware testing (2026-08-23) points at a MAC/PHY duplex
+    // mismatch: net_stack's own counters show ARP replies being generated
+    // and "sent" every time, both link LEDs (module + switch port) are lit,
+    // but the reply never reaches the PC (no ARP cache entry ever appears).
+    // That signature -- transmit believed complete, frame never actually
+    // lands -- is the classic duplex-mismatch symptom. Since every modern
+    // switch auto-negotiates full duplex given the chance, matching the MAC
+    // to full duplex (without touching the PHY at all, which would need an
+    // untested MII/PHCON1 write) is the cheap, low-risk experiment: if the
+    // PHY's own default was already auto-negotiating full duplex against the
+    // switch, this removes the mismatch entirely.
+    // MABBIPG follows: 0x15 is the datasheet-documented full-duplex value
+    // (half-duplex used 0x12 + a MAIPGH write that only matters for half
+    // duplex; MAIPGH is left in place below, harmless when unused).
     // MAC address 02:42:CE:60:00:<HOST_ID>, locally administered.
     // Final ECON1 writes double as "select bank N" + "keep RXEN set", since
     // RXEN and BSEL share the same register.
@@ -170,12 +187,12 @@ module eth_top #(
         //    avoid the pattern-match filter per errata) --
         cfg_op[ci]=WCR(A_ECON1);    cfg_dat[ci]=8'h01; ci=ci+1; // bank 1
         cfg_op[ci]=WCR(A_ERXFCON);  cfg_dat[ci]=8'hA1; ci=ci+1;
-        // -- bank 2: MAC config, half duplex --
+        // -- bank 2: MAC config, full duplex (see comment above) --
         cfg_op[ci]=WCR(A_ECON1);    cfg_dat[ci]=8'h02; ci=ci+1; // bank 2
         cfg_op[ci]=WCR(A_MACON1);   cfg_dat[ci]=8'h01; ci=ci+1; // MARXEN
-        cfg_op[ci]=WCR(A_MACON3);   cfg_dat[ci]=8'h32; ci=ci+1; // pad/CRC/half-dup
+        cfg_op[ci]=WCR(A_MACON3);   cfg_dat[ci]=8'h33; ci=ci+1; // pad/CRC/full-dup
         cfg_op[ci]=WCR(A_MACON4);   cfg_dat[ci]=8'h00; ci=ci+1;
-        cfg_op[ci]=WCR(A_MABBIPG);  cfg_dat[ci]=8'h12; ci=ci+1;
+        cfg_op[ci]=WCR(A_MABBIPG);  cfg_dat[ci]=8'h15; ci=ci+1; // full-duplex value
         cfg_op[ci]=WCR(A_MAIPGL);   cfg_dat[ci]=8'h12; ci=ci+1;
         cfg_op[ci]=WCR(A_MAIPGH);   cfg_dat[ci]=8'h0C; ci=ci+1;
         cfg_op[ci]=WCR(A_MAMXFLL);  cfg_dat[ci]=8'hEE; ci=ci+1; // 1518
@@ -510,6 +527,7 @@ module eth_top #(
         .oled_ready(o_ready), .oled_nack(oled_i2c_err_sticky),
         .eth_ready(eth_ready), .eth_econ1(econ1_rb),
         .net_frames(eth_frames_seen), .net_replies(eth_arp_replies),
+        .net_eir(eth_last_eir), .net_estat(eth_last_estat),
         .uart_rx_pin(uart_rx), .uart_tx_pin(uart_tx)
     );
 
