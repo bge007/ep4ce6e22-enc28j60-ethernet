@@ -200,8 +200,22 @@ outside printable ASCII renders blank.
 
 ## Module pinout
 
-![1.3 inch OLED module pinout: four pins labelled 5V, GND, SCL and SDA](1.3inch-oled-pin.jpg)
+![SSD1306 OLED module, front view, showing display content and the four-pin header labelled GND, VDD, SCK and SDA](OLED-SSD1306-2.jpg)
 
-Four pins only. Despite the `5V` label, wire VCC to 3.3 V here -- see the
-warning at the top of this page. Image credit as per
-[docs/wiring.md](wiring.md#image-credits).
+Four pins only: `GND`, `VDD`, `SCK` (I²C clock — `oled_scl` in this project)
+and `SDA`. Whatever the module's own silkscreen says the supply pin wants,
+wire it to 3.3 V here — see the warning at the top of this page.
+
+![SSD1306 OLED module, back view, showing the address-select markings 0x78 and 0x7A next to resistors R11/R12](OLED-SSD1306-1.jpg)
+
+The back of the same family of module usually breaks out the I²C address
+choice as a pair of solder-jumper resistor pads silkscreened `0x78`/`0x7A` —
+this project uses the default `0x78` (7-bit `0x3C`, write), matching
+`i2c_master`'s fixed `I2C_ADR` parameter. If a module of this type ever
+doesn't ACK, check which pad is actually populated before suspecting wiring.
+
+These replace an earlier reference photo that turned out to be for a
+different vendor's blue-PCB 1.3" module and doesn't represent the SSD1306
+unit actually used here — see
+[Controller identity](#the-datasheet-mislabels-the-controller--trust-the-real-hardware-not-the-paper)
+above. Image credit as per [docs/wiring.md](wiring.md#image-credits).

@@ -245,11 +245,11 @@ repository's MIT licence like the rest of the source.
 
 The board photographs and the panel datasheet in this directory —
 `pinout-ENC28J60.png`, `pinlayout-EP4CE6E22-fpga_board.jpg`,
-`pinout-EP4CE6E22-fpga_board_info.jpg`, `1.3inch-oled-pin.jpg` and
-`3nfR8M2Am86tmUNdMO8j8wvWXkTdW8tsHJ4XG1fn.pdf` (the QG-2864KSWLG01 panel
-datasheet — labelled SH1106G, though the real silicon on this module is
-SSD1306; see [docs/oled.md](oled.md)) — are **vendor product, manual and
-datasheet material**, reproduced
+`pinout-EP4CE6E22-fpga_board_info.jpg`, `OLED-SSD1306-1.jpg`,
+`OLED-SSD1306-2.jpg` and `3nfR8M2Am86tmUNdMO8j8wvWXkTdW8tsHJ4XG1fn.pdf` (the
+QG-2864KSWLG01 panel datasheet — labelled SH1106G, though the real silicon on
+this module is SSD1306; see [docs/oled.md](oled.md)) — are **vendor product,
+manual and datasheet material**, reproduced
 here for identification and reference. They are not original work of this
 project and are **not covered by the repository's MIT licence**, which applies
 to the source code and written documentation only.
