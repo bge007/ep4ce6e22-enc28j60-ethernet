@@ -509,6 +509,7 @@ module eth_top #(
         .msg_rd_addr(msg_addr), .msg_rd_data(msg_char), .msg_updated(msg_updated),
         .oled_ready(o_ready), .oled_nack(oled_i2c_err_sticky),
         .eth_ready(eth_ready), .eth_econ1(econ1_rb),
+        .net_frames(eth_frames_seen), .net_replies(eth_arp_replies),
         .uart_rx_pin(uart_rx), .uart_tx_pin(uart_tx)
     );
 

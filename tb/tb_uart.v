@@ -63,6 +63,10 @@ module tb_uart;
     reg        oled_nack_tb  = 1'b0;
     reg        eth_ready_tb  = 1'b0;
     reg  [7:0] eth_econ1_tb  = 8'h00;
+    // Both held at zero, matching oled_ready_tb/oled_nack_tb above: never
+    // changing keeps req_net from ever firing here too.
+    reg [15:0] net_frames_tb  = 16'd0;
+    reg [15:0] net_replies_tb = 16'd0;
 
     uart_console #(.CLK_HZ(CLK_HZ), .BAUD(BAUD), .HOST_ID(8'd1)) dut (
         .clk(clk), .rst(rst),
@@ -70,6 +74,7 @@ module tb_uart;
         .msg_rd_addr(msg_addr), .msg_rd_data(msg_char), .msg_updated(msg_updated),
         .oled_ready(oled_ready_tb), .oled_nack(oled_nack_tb),
         .eth_ready(eth_ready_tb), .eth_econ1(eth_econ1_tb),
+        .net_frames(net_frames_tb), .net_replies(net_replies_tb),
         .uart_rx_pin(host_rx), .uart_tx_pin(host_tx));
 
     // Collect everything the console transmits.

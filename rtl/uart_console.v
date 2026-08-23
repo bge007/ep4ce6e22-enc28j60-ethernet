@@ -16,6 +16,14 @@
 //     wrong values on real hardware -- see eth_top.v's cfg_op comment. ECON1
 //     is an Ethernet-type/common register with no such ambiguity and has
 //     read back correctly against real hardware every time.
+//   * "NET F=xxxx R=xxxx" every time net_frames or net_replies changes --
+//     M3's frame/ARP-reply counters. Lets a `ping` failure be isolated by
+//     eye instead of guessed at: F stuck at 0 means the ENC28J60 never saw a
+//     frame at all (link/physical problem, or the MAC filter is rejecting
+//     everything); F increments but R doesn't mean frames arrive but aren't
+//     recognised as an ARP request for us; R increments but ping still fails
+//     means the reply is being sent but not reaching the PC (duplex, switch,
+//     or wiring on the return path).
 //
 // Receives a line of printable ASCII terminated by CR or LF into a 21-character
 // buffer -- 21 because that is one OLED text line. Backspace and DEL erase.
@@ -46,6 +54,9 @@ module uart_console #(
 
     input  wire       eth_ready,     // M2 link/MAC init complete
     input  wire [7:0] eth_econ1,     // ECON1 readback after RXEN set
+
+    input  wire [15:0] net_frames,   // M3: frames seen by net_stack
+    input  wire [15:0] net_replies,  // M3: ARP replies sent
 
     input  wire       uart_rx_pin,
     output wire       uart_tx_pin
@@ -90,7 +101,7 @@ module uart_console #(
     // Transmit: banner, key state, or line echo
     // ------------------------------------------------------------------
     localparam T_NONE     = 3'd0, T_BANNER   = 3'd1, T_KEYS = 3'd2, T_ECHO = 3'd3,
-               T_OLED_RDY = 3'd4, T_OLED_ERR = 3'd5, T_ETH = 3'd6;
+               T_OLED_RDY = 3'd4, T_OLED_ERR = 3'd5, T_ETH = 3'd6, T_NET = 3'd7;
 
     localparam integer BANNER_N   = 24;
     localparam integer KEYS_N     = 11;
@@ -98,6 +109,7 @@ module uart_console #(
     localparam integer OLED_RDY_N = 12;   // "OLED READY\r\n"
     localparam integer OLED_ERR_N = 15;   // "OLED I2C NACK\r\n"
     localparam integer ETH_N      = 11;   // "ETH C1=xx\r\n"
+    localparam integer NET_N      = 19;   // "NET F=xxxx R=xxxx\r\n"
 
     function [7:0] hexdig(input [3:0] n);
         hexdig = (n < 4'd10) ? (8'h30 + n) : (8'h41 + n - 4'd10);
@@ -128,14 +140,16 @@ module uart_console #(
 
     reg [2:0] cur;
     reg [5:0] sidx;
-    reg       req_banner, req_keys, req_echo, req_oled_rdy, req_oled_err, req_eth;
+    reg       req_banner, req_keys, req_echo, req_oled_rdy, req_oled_err, req_eth, req_net;
     reg       oled_ready_d, oled_nack_d, eth_ready_d;   // for edge detection
+    reg [15:0] net_frames_d, net_replies_d;
 
     wire [5:0] cur_len = (cur == T_BANNER)   ? BANNER_N[5:0]   :
                          (cur == T_KEYS)     ? KEYS_N[5:0]     :
                          (cur == T_OLED_RDY) ? OLED_RDY_N[5:0] :
                          (cur == T_OLED_ERR) ? OLED_ERR_N[5:0] :
                          (cur == T_ETH)      ? ETH_N[5:0]      :
+                         (cur == T_NET)      ? NET_N[5:0]      :
                                                ECHO_N[5:0];
 
     // "ETH C1=xx\r\n" -- ECON1 readback as hex.
@@ -153,6 +167,32 @@ module uart_console #(
             6'd8: eth_byte = hexdig(eth_econ1[3:0]);
             6'd9: eth_byte = 8'h0D;
             default: eth_byte = 8'h0A;
+        endcase
+    end
+
+    // "NET F=xxxx R=xxxx\r\n" -- M3's frame/ARP-reply counters, hex.
+    reg [7:0] net_byte;
+    always @(*) begin
+        case (sidx)
+            6'd0:  net_byte = "N";
+            6'd1:  net_byte = "E";
+            6'd2:  net_byte = "T";
+            6'd3:  net_byte = " ";
+            6'd4:  net_byte = "F";
+            6'd5:  net_byte = "=";
+            6'd6:  net_byte = hexdig(net_frames[15:12]);
+            6'd7:  net_byte = hexdig(net_frames[11:8]);
+            6'd8:  net_byte = hexdig(net_frames[7:4]);
+            6'd9:  net_byte = hexdig(net_frames[3:0]);
+            6'd10: net_byte = " ";
+            6'd11: net_byte = "R";
+            6'd12: net_byte = "=";
+            6'd13: net_byte = hexdig(net_replies[15:12]);
+            6'd14: net_byte = hexdig(net_replies[11:8]);
+            6'd15: net_byte = hexdig(net_replies[7:4]);
+            6'd16: net_byte = hexdig(net_replies[3:0]);
+            6'd17: net_byte = 8'h0D;
+            default: net_byte = 8'h0A;
         endcase
     end
 
@@ -195,6 +235,7 @@ module uart_console #(
                          : (cur == T_OLED_RDY) ? oled_rdy_msg[sidx[3:0]]
                          : (cur == T_OLED_ERR) ? oled_err_msg[sidx[3:0]]
                          : (cur == T_ETH)      ? eth_byte
+                         : (cur == T_NET)      ? net_byte
                                                : echo_byte;
 
     always @(posedge clk) begin
@@ -211,9 +252,12 @@ module uart_console #(
             req_oled_rdy <= 1'b0;
             req_oled_err <= 1'b0;
             req_eth      <= 1'b0;
+            req_net      <= 1'b0;
             oled_ready_d <= 1'b0;
             oled_nack_d  <= 1'b0;
             eth_ready_d  <= 1'b0;
+            net_frames_d  <= 16'd0;
+            net_replies_d <= 16'd0;
             for (k = 0; k < MSG_LEN; k = k + 1) msg[k] <= 8'h20;
         end else begin
 
@@ -250,6 +294,11 @@ module uart_console #(
             if (oled_nack  && !oled_nack_d)  req_oled_err <= 1'b1;
             if (eth_ready  && !eth_ready_d)  req_eth      <= 1'b1;
 
+            net_frames_d  <= net_frames;
+            net_replies_d <= net_replies;
+            if (net_frames != net_frames_d || net_replies != net_replies_d)
+                req_net <= 1'b1;
+
             // ---- transmit -----------------------------------------------
             if (cur == T_NONE) begin
                 sidx <= 6'd0;
@@ -258,6 +307,7 @@ module uart_console #(
                 // state. Key changes are the most frequent and least urgent.
                 if      (req_banner)   begin cur <= T_BANNER;   req_banner   <= 1'b0; end
                 else if (req_eth)      begin cur <= T_ETH;      req_eth      <= 1'b0; end
+                else if (req_net)      begin cur <= T_NET;      req_net      <= 1'b0; end
                 else if (req_oled_rdy) begin cur <= T_OLED_RDY; req_oled_rdy <= 1'b0; end
                 else if (req_oled_err) begin cur <= T_OLED_ERR; req_oled_err <= 1'b0; end
                 else if (req_echo)     begin cur <= T_ECHO;     req_echo     <= 1'b0; end
