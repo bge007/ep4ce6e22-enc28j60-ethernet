@@ -76,7 +76,12 @@ Two things that cause most first-time failures:
 ```
 
 Simulates then compiles. `-Sim` stops after simulation; `-Prog` also programs
-the board via openFPGALoader.
+the board's SRAM via openFPGALoader (volatile -- lost on reset/power-cycle);
+`-Flash` programs the onboard config flash instead, so the design boots on
+its own without a PC or USB-Blaster attached. See the README's Building
+section or the comment block at the top of `build.ps1` for the full set of
+options (`-ProgOnly`/`-FlashOnly` skip straight to programming from an
+existing `.sof`).
 
 ## Results as built
 

@@ -205,7 +205,7 @@ straight-through cable to a PC just works.
 | [`docs/wiring.md`](docs/wiring.md) | Pin-by-pin wiring for both nodes, board photos, the switch topology |
 | [`docs/wiring-diagram.svg`](docs/wiring-diagram.svg) | The colour-coded jumper diagram, as a standalone SVG |
 | [`docs/bringup.md`](docs/bringup.md) | How to read the LEDs, what each failure mode looks like |
-| [`build.ps1`](build.ps1) | Simulate, compile, and program in one command |
+| [`build.ps1`](build.ps1) | Simulate, compile, and program (SRAM or non-volatile flash) in one command |
 
 ## Building
 
@@ -213,14 +213,30 @@ Needs Quartus Prime Lite 25.1 (Questa FSE ships bundled with it, so there is
 no separate simulator to install).
 
 ```powershell
-.\build.ps1          # simulate, then compile
-.\build.ps1 -Sim     # simulate only
-.\build.ps1 -Prog    # compile and program the board
+.\build.ps1              # simulate, then compile
+.\build.ps1 -Sim         # simulate only
+.\build.ps1 -Prog        # compile + program SRAM (volatile -- lost on reset/power-cycle)
+.\build.ps1 -ProgOnly    # program SRAM from the existing .sof, skip simulate/compile
+.\build.ps1 -Flash       # compile + program the config flash (non-volatile -- boots on its own)
+.\build.ps1 -FlashOnly   # program the config flash from the existing .sof, skip simulate/compile
 ```
+
+`-Prog`/`-ProgOnly` write the FPGA's SRAM directly — fast, but the design is
+gone on the next power-cycle or reset-button press, exactly like every other
+programming step described elsewhere in this README. `-Flash`/`-FlashOnly`
+write the board's onboard config flash instead (a Winbond-compatible chip,
+confirmed via `openFPGALoader --detect -f`) — the board loads the design from
+flash on its own every time it powers up, no USB-Blaster or PC required
+afterward. Flashing takes longer (erase + write + verify a whole sector) and
+is a real write cycle on physical flash, so `-Prog` remains the right choice
+for day-to-day iteration; reach for `-Flash` only once a design is meant to
+stick.
 
 Tool paths default to a stock `C:\altera_lite\25.1std` install. Override with
 `-QuartusBin` / `-QuestaBin` / `-LoaderExe`, or the `QUARTUS_BIN`,
-`QUESTA_BIN`, `OFL_EXE` environment variables.
+`QUESTA_BIN`, `OFL_EXE` environment variables. `-Flash`/`-FlashOnly` also need
+`-SojDir`/`-FpgaPart` (or `OFL_SOJ_DIR`/`OFL_FPGA_PART`) — see the comment
+block at the top of [`build.ps1`](build.ps1) for what these are and why.
 
 Programming goes through [openFPGALoader](https://github.com/trabucayre/openFPGALoader)
 rather than Quartus's own JTAG server. If your USB-Blaster is a clone — most
