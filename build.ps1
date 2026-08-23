@@ -51,10 +51,12 @@ if (-not $Prog) {
     Copy-Item ..\rtl\font5x8.mem . -Force
 
     vlog -sv ../rtl/spi_master.v ../rtl/i2c_master.v ../rtl/oled_sh1106.v `
-             ../rtl/eth_top.v ../tb/tb_m1.v ../tb/tb_oled.v
+             ../rtl/uart_tx.v ../rtl/uart_rx.v ../rtl/uart_console.v `
+             ../rtl/debounce.v ../rtl/eth_top.v `
+             ../tb/tb_m1.v ../tb/tb_oled.v ../tb/tb_uart.v
     if (-not $?) { throw "vlog failed" }
 
-    foreach ($tb in @("tb_m1", "tb_oled")) {
+    foreach ($tb in @("tb_m1", "tb_oled", "tb_uart")) {
         Write-Host "--- $tb ---" -ForegroundColor DarkCyan
         $out = (vsim -c -do "run -all; quit -f" $tb) -join "`n"
         Write-Host $out

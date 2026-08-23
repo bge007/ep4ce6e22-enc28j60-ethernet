@@ -38,13 +38,13 @@ are all simultaneously working.
 
 | | |
 |---|---|
-| Simulation | Passes — two self-checking testbenches, against behavioral ENC28J60 (SPI) and SH1106 (I²C) models |
+| Simulation | Passes — three self-checking testbenches, against behavioral ENC28J60 (SPI) and SH1106 (I²C) models plus a UART loopback |
 | Quartus compile | 0 errors |
-| Logic elements | 602 / 6,272 (10%) |
-| Registers | 221 |
+| Logic elements | 1,499 / 6,272 (24%) |
+| Registers | 582 |
 | Memory bits | 4,472 / 276,480 (2%) |
-| Worst-case setup slack | +4.53 ns |
-| Worst-case hold slack | +0.43 ns |
+| Worst-case setup slack | +4.27 ns |
+| Worst-case hold slack | +0.45 ns |
 | Hardware | **Not yet tested** |
 
 **The OLED display also works.** Each node drives a 1.3" 128×64 SH1106 panel
@@ -54,14 +54,32 @@ it transmits, Host B what it receives. See [docs/oled.md](docs/oled.md) —
 including the two traps, powering it at 3.3 V rather than the 5 V on the
 silkscreen, and the SH1106's two-column RAM offset.
 
+**And a serial console, on the board's onboard CH340** — one USB-C cable
+carries power and the terminal, no dongle needed. It prints a banner at reset,
+a line every time a button changes, and takes a line you type and puts it on
+the OLED. See [docs/serial-console.md](docs/serial-console.md).
+
+```powershell
+.\pc\serial-monitor.ps1
 ```
-EP4CE6E22 ENC28J60
-EREVID 0x06 OK
-HOST A 192.168.1.60
-MSG --
+```
+EP4CE6E22 node A ready
+KEYS 0...
+KEYS 0.2.
+MSG: Hello World
 ```
 
-The full stack is budgeted at ~2,500 LE on top of this, which still fits.
+The OLED mirrors it — the four buttons on line 2, the typed message on line 3:
+
+```
+HOST A 192.168.1.60
+EREVID 0x06 OK
+KEYS 0.2.
+Hello World
+```
+
+The Ethernet stack is budgeted at ~2,500 LE on top of this, which still fits
+in the remaining 4,773.
 
 ## Bill of materials
 
@@ -151,10 +169,16 @@ switch), because the ENC28J60's lack of Auto-MDIX is unchanged.
 | [`rtl/i2c_master.v`](rtl/i2c_master.v) | Write-only open-drain I²C master, 400 kHz |
 | [`rtl/oled_sh1106.v`](rtl/oled_sh1106.v) | SH1106 OLED driver: init, page addressing, 4×21 text |
 | [`rtl/font5x8.mem`](rtl/font5x8.mem) | ASCII 32–126 font, generated — don't hand-edit |
-| [`rtl/eth_top.v`](rtl/eth_top.v) | Top level: reset sequencing, EREVID read, LEDs, OLED status |
+| [`rtl/uart_tx.v`](rtl/uart_tx.v), [`rtl/uart_rx.v`](rtl/uart_rx.v) | 8N1 UART at 115200 |
+| [`rtl/uart_console.v`](rtl/uart_console.v) | Banner, key lines, received-line buffer, echo |
+| [`rtl/debounce.v`](rtl/debounce.v) | Four button debouncers with press/release pulses |
+| [`rtl/eth_top.v`](rtl/eth_top.v) | Top level: EREVID read, LEDs, OLED, buttons, console |
 | [`tb/tb_m1.v`](tb/tb_m1.v) | Self-checking testbench + behavioral ENC28J60 SPI-slave model |
 | [`tb/tb_oled.v`](tb/tb_oled.v) | Self-checking testbench + behavioral SH1106 I²C slave model |
+| [`tb/tb_uart.v`](tb/tb_uart.v) | Self-checking UART loopback and console testbench |
+| [`pc/serial-monitor.ps1`](pc/serial-monitor.ps1) | PowerShell terminal for the board's COM port |
 | [`docs/oled.md`](docs/oled.md) | SH1106 column offset, the 3.3 V warning, driver internals |
+| [`docs/serial-console.md`](docs/serial-console.md) | UART pins, buttons, PowerShell usage |
 | [`tools/`](tools/) | Generators for the font and the wiring diagram |
 | [`docs/plan.md`](docs/plan.md) | Design rationale, throughput budget, milestones, errata list |
 | [`docs/wiring.md`](docs/wiring.md) | Pin-by-pin wiring for both nodes, board photos, the crossover cable |
@@ -251,6 +275,7 @@ late collisions and throughput that collapses under load. Both or neither.
 |---|---|---|---|
 | M1 | SPI alive — `spi_master`, EREVID readback | `0x06` on the LEDs | Simulated ✓, hardware ✗ |
 | M1.5 | OLED — I²C master, SH1106 driver, status text | Status text on the panel | Simulated ✓, hardware ✗ |
+| M1.6 | Console — UART, buttons, typed message to OLED | Type in PowerShell, see it on the panel | Simulated ✓, hardware ✗ |
 | M2 | Link up — full init FSM, PHY config | Link LED on both boards | Not started |
 | M3 | Ping — RX/TX engines, ARP, ICMP echo | Sustained ping, 0% loss | Not started |
 | M4 | UDP echo + **message display** | Host A sends `Hello World`, Host B shows it | Not started |
