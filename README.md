@@ -10,20 +10,22 @@ payload, which is what 1,472-byte datagrams work out to once framing overhead
 is accounted for. See [docs/plan.md](docs/plan.md) for that arithmetic and the
 design rationale.
 
-> ### Status: M1 confirmed on real hardware, M2 in progress, M3–M5 not started
+> ### Status: M1–M3 confirmed on real hardware, M4–M5 not started
 >
 > Host A has been flashed and tested on a real EP4CE6E22 + ENC28J60 board.
 > `EREVID` reads back `0x06` on the LEDs and OLED, the serial console and
-> button input work, and M2's RX/TX buffer, MAC filter, MAC address and
-> `RXEN` are written and the `ECON1` readback (`RXEN=1`) is confirmed correct
-> over the real UART. What's still open: the ENC28J60's own link LED hasn't
-> been visually confirmed yet, and the MAC-register (`MACON1`/`MACON3`)
-> readback diagnostic was tried and dropped — two different guesses at the
-> SPI read protocol for MAC-type registers both produced wrong values on real
-> hardware, and this project has never been supplied the ENC28J60 datasheet.
-> That doesn't affect the writes themselves, only my ability to read them back
-> for confirmation; M3's ARP/ICMP responder will be the real end-to-end test.
-> Host B has not been flashed or tested at all yet.
+> button input work, M2's RX/TX buffer, MAC filter, MAC address and `RXEN`
+> are written and the `ECON1` readback (`RXEN=1`) is confirmed correct over
+> the real UART, and M3's ARP responder is implemented, simulation-verified,
+> and flashed. What's still open: the ENC28J60's own link LED hasn't been
+> visually confirmed yet, the MAC-register (`MACON1`/`MACON3`) readback
+> diagnostic was tried and dropped (two different guesses at the SPI read
+> protocol for MAC-type registers both produced wrong values on real
+> hardware, and this project has never been supplied the ENC28J60 datasheet
+> — this doesn't affect the writes themselves, only my ability to read them
+> back for confirmation), and M3's real-hardware `ping` retest (expect
+> "Destination host unreachable" → "Request timed out") hasn't been confirmed
+> yet. Host B has not been flashed or tested at all yet.
 
 ---
 
@@ -42,19 +44,21 @@ are all simultaneously working.
 
 | | |
 |---|---|
-| Simulation | Passes — four self-checking testbenches, against behavioral ENC28J60 (SPI, including a full per-bank register model for M2) and SH1106 (I²C) models plus a UART loopback |
+| Simulation | Passes — five self-checking testbenches, against behavioral ENC28J60 models (SPI with per-bank registers for M2; full 8 KB buffer memory with RBM/WBM pointer emulation for M3's ARP responder) and SH1106 (I²C) plus a UART loopback |
 | Quartus compile | 0 errors |
-| Logic elements | 1,661 / 6,272 (26%) |
-| Worst-case setup slack | +4.85 ns |
-| Worst-case hold slack | +0.43 ns |
-| Hardware | M1 confirmed, M2's RXEN confirmed (`ECON1` readback), rest **not yet tested** |
+| Logic elements | 2,176 / 6,272 (35%) |
+| Worst-case setup slack | +7.85 ns |
+| Worst-case hold slack | +0.19 ns |
+| Hardware | M1 confirmed, M2's RXEN confirmed (`ECON1` readback), M3 flashed to Host A — `ping` retest pending |
 
 **The OLED display also works.** Each node drives a 1.3" 128×64 SH1106 panel
 over I²C showing the board identity, the live EREVID readback, the host's IP,
 and a message line. Line 3 is the hook for milestone 4: Host A will write what
 it transmits, Host B what it receives. See [docs/oled.md](docs/oled.md) —
 including the two traps, powering it at 3.3 V rather than the 5 V on the
-silkscreen, and the SH1106's two-column RAM offset.
+silkscreen, the SH1106's two-column RAM offset, and a
+[reset-button gotcha](docs/oled.md#troubleshooting-panel-blank-after-power-up-despite-clean-ic)
+seen on real hardware after reflashing.
 
 **And a serial console, on the board's onboard CH340** — one USB-C cable
 carries power and the terminal, no dongle needed. It prints a banner at reset,
@@ -296,11 +300,11 @@ and throughput that collapses under load.
 
 | | Milestone | Exit criterion | State |
 |---|---|---|---|
-| M1 | SPI alive — `spi_master`, EREVID readback | `0x06` on the LEDs | Simulated ✓, hardware ✗ |
-| M1.5 | OLED — I²C master, SH1106 driver, status text | Status text on the panel | Simulated ✓, hardware ✗ |
-| M1.6 | Console — UART, buttons, typed message to OLED | Type in PowerShell, see it on the panel | Simulated ✓, hardware ✗ |
-| M2 | Link up — RX/TX buffer, MAC filter, MAC config, MAC address, RXEN | Link LED on both boards | RXEN confirmed on hardware ✓, link LED pending |
-| M3 | Ping — RX/TX engines, ARP, ICMP echo | Sustained ping, 0% loss | Not started |
+| M1 | SPI alive — `spi_master`, EREVID readback | `0x06` on the LEDs | Simulated ✓, hardware ✓ (Host A) |
+| M1.5 | OLED — I²C master, SH1106 driver, status text | Status text on the panel | Simulated ✓, hardware ✓ (Host A — see [docs/oled.md](docs/oled.md#troubleshooting-panel-blank-after-power-up-despite-clean-ic) for a reset-button gotcha) |
+| M1.6 | Console — UART, buttons, typed message to OLED | Type in PowerShell, see it on the panel | Simulated ✓, hardware ✓ (Host A, byte-perfect round trip) |
+| M2 | Link up — RX/TX buffer, MAC filter, MAC config, MAC address, RXEN | Link LED on both boards | RXEN confirmed on hardware ✓ (Host A), link LED pending |
+| M3 | Ping — ARP responder (ICMP echo deferred to M4) | `ping` moves from "unreachable" to "timed out" | Simulated ✓, flashed to Host A, hardware retest pending |
 | M4 | UDP echo + **message display** | Host A sends `Hello World`, Host B shows it | Not started |
 | M5 | Max speed — UDP blaster + measurement | ≥ 9.3 Mbit/s, loss-free | Not started |
 

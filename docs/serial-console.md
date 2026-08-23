@@ -155,4 +155,5 @@ PASS: UART loopback, banner, key lines, line receive, echo, backspace
 Quartus 25.1 with everything integrated: 0 errors, **1,499 / 6,272 LE (24 %)**,
 582 registers, +4.27 ns setup and +0.45 ns hold slack.
 
-Still **not tested on hardware**, like the rest of this repo.
+**Confirmed on real hardware, Host A, 2026-08-23** — sent `Hello World` over
+the CH340 COM port, got back `MSG: Hello World`, byte-perfect.

@@ -147,7 +147,41 @@ PASS: SH1106 init, 0x02/0x10 column offset on all 18 pages, 8 pages painted, tex
 Quartus 25.1 with the OLED integrated: 0 errors, **602 / 6,272 LE (10 %)**,
 4,472 memory bits, +4.53 ns setup and +0.43 ns hold slack.
 
-Still **not tested on hardware** — like the rest of this repo.
+**Confirmed on real hardware, Host A, 2026-08-23** — see the troubleshooting
+note below for the one gotcha that came with it.
+
+## Troubleshooting: panel blank after power-up, despite clean I²C
+
+Symptom seen on real hardware: I²C traffic is correct (the console's
+diagnostic UART lines report `OLED READY`, meaning every ACK came back
+clean — wiring, address, and 3.3 V level are all fine), but the panel itself
+stays completely dark.
+
+**This is not an SH1106/SSD1306 command-set bug** — that hypothesis was
+tried (temporarily swapping the charge-pump bytes and column-offset for the
+SSD1306 variant via an `OLED_SSD1306_COMPAT` build parameter) and ruled out;
+the panel is a genuine SH1106G as documented above, and the standard SH1106
+init sequence is correct.
+
+**The actual cause: the OLED module's own power-on-reset needs a moment the
+FPGA doesn't wait for.** The FPGA starts sending I²C commands the instant its
+own reset releases, which is essentially immediately after configuration —
+but the panel's charge pump and internal POR circuit may not have settled
+yet, especially right after a fresh `openFPGALoader`/JTAG programming cycle
+(which doesn't power-cycle the OLED module at all, only reconfigures the
+FPGA). The commands arrive, the slave ACKs them, but the panel ignores them.
+
+**Fix: press the FPGA board's own reset button.** That re-asserts `nrst`,
+which restarts `oled_sh1106`'s entire init → clear → display-on sequence from
+scratch, by which point the panel's own POR has settled — the second attempt
+sticks. This has been the reliable fix every time this has come up; a fresh
+`-ProgOnly` reflash of the FPGA is exactly the situation most likely to
+trigger it, since it changes the FPGA's logic without power-cycling the OLED
+module.
+
+If pressing reset doesn't bring the panel back, then re-check wiring/power
+first (the two things at the top of this page) rather than assuming this
+same cause.
 
 ## The message protocol (milestone 4)
 

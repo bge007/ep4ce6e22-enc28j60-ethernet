@@ -122,9 +122,9 @@ Total ~2,500 LE of 6,272 — comfortable margin, no external RAM.
 
 | | Milestone | Exit criterion | State |
 |---|---|---|---|
-| M1 | SPI alive — project, pinout, `spi_master`, EREVID readback | `0x06` on the LEDs | **Simulated and synthesised; not yet on hardware** |
-| M2 | Link up — full init FSM, PHY config, link LED | Link established | Not started |
-| M3 | Ping — RX/TX engines, ARP responder, ICMP echo | Sustained ping, 0% loss | Not started |
+| M1 | SPI alive — project, pinout, `spi_master`, EREVID readback | `0x06` on the LEDs | **Confirmed on Host A hardware** |
+| M2 | Link up — full init FSM, MAC config, RXEN | Link established | RXEN confirmed on Host A hardware; link LED not yet visually checked |
+| M3 | Ping — RX/TX engines, ARP responder (ICMP echo deferred to M4) | Sustained ping, 0% loss | Implemented, simulation-verified, flashed to Host A; hardware `ping` retest pending |
 | M4 | UDP echo — parsing, checksums, echo path | 10k datagrams echoed correctly | Not started |
 | M5 | Max speed — UDP blaster, measurement scripts, full duplex | >= 9.3 Mbit/s, loss-free | Not started |
 
