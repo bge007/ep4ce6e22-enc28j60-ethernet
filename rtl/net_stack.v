@@ -117,7 +117,8 @@ module net_stack #(
                S_CLEANUP3   = 6'd28, S_CLEANUP4   = 6'd29,
                S_WCR_OP     = 6'd30, S_WCR_DATA   = 6'd31, // generic 1-shot WCR
                S_RCR_OP     = 6'd32, S_RCR_WAIT   = 6'd33, // generic 1-shot RCR
-               S_RD_EIR_GO  = 6'd34, S_RD_ESTAT_GO = 6'd35; // TX diagnostic readback
+               S_RD_EIR_GO  = 6'd34, S_RD_ESTAT_GO = 6'd35, // TX diagnostic readback
+               S_TXRST0     = 6'd36, S_TXRST1     = 6'd37; // errata: reset TX logic before every TX
 
     reg [5:0]  state, ret_state;    // ret_state: where the generic WCR/RCR returns to
     reg [4:0]  wcr_addr;
@@ -411,6 +412,26 @@ module net_stack #(
                 end
                 S_SETETXND1: begin
                     wcr_addr  <= A_ETXNDH; wcr_data <= ARP_ETXND[15:8];
+                    ret_state <= S_TXRST0;
+                    state     <= S_WCR_OP;
+                end
+
+                // Documented ENC28J60 errata: the transmit logic can get
+                // corrupted after a transmission (successful or not) and must
+                // be reset -- ECON1.TXRST pulsed high then low -- before every
+                // subsequent TX, not just the first. Real-hardware evidence
+                // for exactly this (2026-08-24): EIR read back after every TX
+                // attempt never once showed TXIF (bit3, "transmission
+                // complete") set across dozens of attempts, with no TXERIF/
+                // TXABRT/LATECOL error bit set either -- consistent with the
+                // transmit logic being wedged rather than erroring out.
+                S_TXRST0: begin
+                    wcr_addr  <= A_ECON1; wcr_data <= 8'h80;   // TXRST=1
+                    ret_state <= S_TXRST1;
+                    state     <= S_WCR_OP;
+                end
+                S_TXRST1: begin
+                    wcr_addr  <= A_ECON1; wcr_data <= 8'h00;   // TXRST=0
                     ret_state <= S_TXRTS;
                     state     <= S_WCR_OP;
                 end
