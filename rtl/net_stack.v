@@ -83,7 +83,17 @@ module net_stack #(
     // walked -- if that is not 0x0806/0x0800 on a real network, the read
     // pointer is misaligned and we are parsing garbage.
     output reg  [15:0]  arp_reqs,
-    output reg  [15:0]  last_etype
+    output reg  [15:0]  last_etype,
+    // Transmit status vector, read straight out of the buffer after each TX.
+    // tsv_count = bytes the part says it queued; tsv_wire = "Total Bytes
+    // Transmitted on Wire" (TSV bits 47-32) -- zero there means nothing
+    // physically left the chip, which no amount of switch-side counting can
+    // tell us. tsv_stat2/3 carry Transmit Done, CRC/length errors, collision
+    // count, defer, giant and underrun.
+    output reg  [15:0]  tsv_count,
+    output reg  [15:0]  tsv_wire,
+    output reg  [7:0]   tsv_stat2,
+    output reg  [7:0]   tsv_stat3
 );
 
     // ------------------------------------------------------------------
@@ -231,43 +241,52 @@ module net_stack #(
     // ------------------------------------------------------------------
     // FSM
     // ------------------------------------------------------------------
-    localparam S_INIT0      = 6'd0,  S_INIT1      = 6'd1,
-               S_POLL       = 6'd2,  S_POLL_WAIT  = 6'd3,  S_POLL_CHECK = 6'd4,
-               S_SETRDPT0   = 6'd5,  S_SETRDPT1   = 6'd6,  S_SETRDPT2   = 6'd7,
-               S_RBM_OP     = 6'd8,  S_RBM_OPWAIT = 6'd9,
-               S_RBM_HDR_GO = 6'd10, S_RBM_HDR_WT = 6'd11,
-               S_RBM_BOD_GO = 6'd12, S_RBM_BOD_WT = 6'd13,
-               S_TX_BANK    = 6'd14, S_SETWRPT0   = 6'd15, S_SETWRPT1   = 6'd16,
-               S_WBM_OP     = 6'd17, S_WBM_OPWAIT = 6'd18,
-               S_WBM_BOD_GO = 6'd19, S_WBM_BOD_WT = 6'd20,
-               S_SETETXND0  = 6'd21, S_SETETXND1  = 6'd22,
-               S_TXRTS      = 6'd23, S_TXWAIT     = 6'd24,
-               S_CLEANUP0   = 6'd25, S_CLEANUP1   = 6'd26, S_CLEANUP2   = 6'd27,
-               S_CLEANUP3   = 6'd28, S_CLEANUP4   = 6'd29,
-               S_WCR_OP     = 6'd30, S_WCR_DATA   = 6'd31, // generic 1-shot WCR
-               S_RCR_OP     = 6'd32, S_RCR_WAIT   = 6'd33, // generic 1-shot RCR
-               S_RD_EIR_GO  = 6'd34, S_RD_ESTAT_GO = 6'd35, // TX diagnostic readback
-               S_TXRST0     = 6'd36, S_TXRST1     = 6'd37, // errata: reset TX logic before every TX
+    localparam S_INIT0      = 7'd0,  S_INIT1      = 7'd1,
+               S_POLL       = 7'd2,  S_POLL_WAIT  = 7'd3,  S_POLL_CHECK = 7'd4,
+               S_SETRDPT0   = 7'd5,  S_SETRDPT1   = 7'd6,  S_SETRDPT2   = 7'd7,
+               S_RBM_OP     = 7'd8,  S_RBM_OPWAIT = 7'd9,
+               S_RBM_HDR_GO = 7'd10, S_RBM_HDR_WT = 7'd11,
+               S_RBM_BOD_GO = 7'd12, S_RBM_BOD_WT = 7'd13,
+               S_TX_BANK    = 7'd14, S_SETWRPT0   = 7'd15, S_SETWRPT1   = 7'd16,
+               S_WBM_OP     = 7'd17, S_WBM_OPWAIT = 7'd18,
+               S_WBM_BOD_GO = 7'd19, S_WBM_BOD_WT = 7'd20,
+               S_SETETXND0  = 7'd21, S_SETETXND1  = 7'd22,
+               S_TXRTS      = 7'd23, S_TXWAIT     = 7'd24,
+               S_CLEANUP0   = 7'd25, S_CLEANUP1   = 7'd26, S_CLEANUP2   = 7'd27,
+               S_CLEANUP3   = 7'd28, S_CLEANUP4   = 7'd29,
+               S_WCR_OP     = 7'd30, S_WCR_DATA   = 7'd31, // generic 1-shot WCR
+               S_RCR_OP     = 7'd32, S_RCR_WAIT   = 7'd33, // generic 1-shot RCR
+               S_RD_EIR_GO  = 7'd34, S_RD_ESTAT_GO = 7'd35, // TX diagnostic readback
+               S_TXRST0     = 7'd36, S_TXRST1     = 7'd37, // errata: reset TX logic before every TX
                // ---- M4: send the current typed line as a UDP message ----
-               S_MSGBANK    = 6'd38, S_MSGWRPT0   = 6'd39, S_MSGWRPT1   = 6'd40,
-               S_MSGTXRST0  = 6'd41, S_MSGTXRST1  = 6'd42,
-               S_MSGOP      = 6'd43, S_MSGOPWAIT  = 6'd44,
-               S_MSGHDR_GO  = 6'd45, S_MSGHDR_WT  = 6'd46,
-               S_MSGBOD_GO  = 6'd47, S_MSGBOD_WT  = 6'd48,
-               S_MSGETXND0  = 6'd49, S_MSGETXND1  = 6'd50,
-               S_MSGTXRTS   = 6'd51, S_MSGTXWAIT  = 6'd52, S_MSGDONE = 6'd53,
-               S_MSGCTRL_GO = 6'd54, S_MSGCTRL_WT = 6'd55,
+               S_MSGBANK    = 7'd38, S_MSGWRPT0   = 7'd39, S_MSGWRPT1   = 7'd40,
+               S_MSGTXRST0  = 7'd41, S_MSGTXRST1  = 7'd42,
+               S_MSGOP      = 7'd43, S_MSGOPWAIT  = 7'd44,
+               S_MSGHDR_GO  = 7'd45, S_MSGHDR_WT  = 7'd46,
+               S_MSGBOD_GO  = 7'd47, S_MSGBOD_WT  = 7'd48,
+               S_MSGETXND0  = 7'd49, S_MSGETXND1  = 7'd50,
+               S_MSGTXRTS   = 7'd51, S_MSGTXWAIT  = 7'd52, S_MSGDONE = 7'd53,
+               S_MSGCTRL_GO = 7'd54, S_MSGCTRL_WT = 7'd55,
                // Re-arm ETXST after each TXRST pulse (see S_SETTXST0 below)
-               S_SETTXST0   = 6'd56, S_SETTXST1   = 6'd57,
-               S_MSGTXST0   = 6'd58, S_MSGTXST1   = 6'd59;
+               S_SETTXST0   = 7'd56, S_SETTXST1   = 7'd57,
+               S_MSGTXST0   = 7'd58, S_MSGTXST1   = 7'd59,
+               // Read back the 7-byte transmit status vector the part writes
+               // just past ETXND after every transmission (datasheet 7.1 /
+               // Table 7-1). Read via RBM, which is already proven working --
+               // unlike the MAC-type register reads this project abandoned.
+               S_TSV_RDPT0  = 7'd60, S_TSV_RDPT1  = 7'd61,
+               S_TSV_OP     = 7'd62, S_TSV_OPWAIT = 7'd63,
+               S_TSV_GO     = 7'd64, S_TSV_WT     = 7'd65;
 
-    reg [5:0]  state, ret_state;    // ret_state: where the generic WCR/RCR returns to
+    reg [6:0]  state, ret_state;    // ret_state: where the generic WCR/RCR returns to
     reg [4:0]  wcr_addr;
     reg [7:0]  wcr_data;
     reg [4:0]  rcr_addr;
     reg [7:0]  rcr_rb;              // generic RCR's captured byte
     reg [26:0] wait_cnt;
     reg        send_pending;    // M4: a typed line is waiting to go out
+    reg [15:0] tsv_addr;        // first byte of the status vector = ETXND + 1
+    reg [2:0]  tsv_idx;
 
     // One TX byte, addressed by txpos, for the 42-byte ARP reply (43 with
     // the leading per-packet control byte handled separately in S_WBM_OP).
@@ -417,6 +436,10 @@ module net_stack #(
             send_pending     <= 1'b0;
             arp_reqs         <= 16'd0;
             last_etype       <= 16'd0;
+            tsv_count        <= 16'd0;
+            tsv_wire         <= 16'd0;
+            tsv_stat2        <= 8'd0;
+            tsv_stat3        <= 8'd0;
         end else if (!start && state == S_INIT0) begin
             // idle until eth_top hands off the bus
         end else begin
@@ -672,13 +695,31 @@ module net_stack #(
                 S_WBM_OPWAIT:
                     if (spi_done) state <= S_WBM_BOD_GO;
 
-                // Byte 0 of the write is the per-packet control byte (0x00:
-                // defer CRC to MACON3.TXCRCEN). Bytes 1..ARP_TX_LEN are the
+                // Byte 0 of the write is the per-packet control byte, 0x07 =
+                // POVERRIDE | PCRCEN | PPADEN (datasheet Figure 7-1: bit 0
+                // POVERRIDE, bit 1 PCRCEN, bit 2 PPADEN). That forces pad-to-60
+                // and a valid appended CRC for THIS packet, overriding MACON3.
+                //
+                // It was 0x00 (defer to MACON3.TXCRCEN) until 2026-08-27, when
+                // the transmit status vector read straight off the chip said:
+                //     TSV n=003C w=003C s2=90 s3=00
+                // 60 bytes queued, 60 bytes actually on the wire, Transmit Done
+                // set, no collisions or deferral -- but s2 bit 4, TRANSMIT CRC
+                // ERROR, also set. A frame with a bad CRC is discarded silently
+                // by any switch, which is precisely the "InOctets climb but no
+                // packet ever completes, and no error counter moves" signature
+                // seen on the Cisco 2960.
+                //
+                // MACON3.TXCRCEN is supposed to be set already (0x32, bit 4),
+                // but this project has never been able to read MAC-type
+                // registers back to confirm it. Overriding per packet removes
+                // that unverifiable dependency completely.
+                // Bytes 1..ARP_TX_LEN are the
                 // 42-byte ARP reply followed by explicit zero padding up to
                 // ARP_TX_LEN -- see the ARP_ETXND comment above for why this
                 // isn't left to MACON3.PADCFG.
                 S_WBM_BOD_GO: begin
-                    spi_tx    <= (txpos == 6'd0) ? 8'h00 : arp_reply_byte(txpos - 6'd1);
+                    spi_tx    <= (txpos == 6'd0) ? 8'h07 : arp_reply_byte(txpos - 6'd1);
                     spi_start <= 1'b1;
                     state     <= S_WBM_BOD_WT;
                 end
@@ -700,6 +741,7 @@ module net_stack #(
                 end
                 S_SETETXND1: begin
                     wcr_addr  <= A_ETXNDH; wcr_data <= ARP_ETXND[15:8];
+                    tsv_addr  <= ARP_ETXND + 16'd1;
                     ret_state <= S_TXRTS;
                     state     <= S_WCR_OP;
                 end
@@ -776,9 +818,58 @@ module net_stack #(
                 S_RD_ESTAT_GO: begin
                     last_eir  <= rcr_rb;
                     rcr_addr  <= A_ESTAT;
-                    ret_state <= S_CLEANUP1;
+                    ret_state <= S_TSV_RDPT0;
                     state     <= S_RCR_OP;
                 end
+
+                // ---- read the 7-byte transmit status vector ----
+                // ECON1 is still on bank 0 from S_TXRTS, so no bank switch.
+                // last_estat is captured here rather than in S_CLEANUP1,
+                // because control no longer lands there straight after the
+                // ESTAT read.
+                S_TSV_RDPT0: begin
+                    last_estat <= rcr_rb;
+                    wcr_addr   <= A_ERDPTL; wcr_data <= tsv_addr[7:0];
+                    ret_state  <= S_TSV_RDPT1;
+                    state      <= S_WCR_OP;
+                end
+                S_TSV_RDPT1: begin
+                    wcr_addr  <= A_ERDPTH; wcr_data <= tsv_addr[15:8];
+                    ret_state <= S_TSV_OP;
+                    state     <= S_WCR_OP;
+                end
+                S_TSV_OP: begin
+                    cs_n      <= 1'b0;
+                    spi_tx    <= OP_RBM;
+                    spi_start <= 1'b1;
+                    tsv_idx   <= 3'd0;
+                    state     <= S_TSV_OPWAIT;
+                end
+                S_TSV_OPWAIT:
+                    if (spi_done) state <= S_TSV_GO;
+                S_TSV_GO: begin
+                    spi_tx <= 8'h00; spi_start <= 1'b1;
+                    state  <= S_TSV_WT;
+                end
+                S_TSV_WT:
+                    if (spi_done) begin
+                        case (tsv_idx)
+                            3'd0: tsv_count[7:0]  <= spi_rx;
+                            3'd1: tsv_count[15:8] <= spi_rx;
+                            3'd2: tsv_stat2       <= spi_rx;
+                            3'd3: tsv_stat3       <= spi_rx;
+                            3'd4: tsv_wire[7:0]   <= spi_rx;
+                            3'd5: tsv_wire[15:8]  <= spi_rx;
+                            default: ;            // byte 6, control-frame flags
+                        endcase
+                        if (tsv_idx == 3'd6) begin
+                            cs_n  <= 1'b1;
+                            state <= S_CLEANUP1;
+                        end else begin
+                            tsv_idx <= tsv_idx + 3'd1;
+                            state   <= S_TSV_GO;
+                        end
+                    end
 
                 // ---- free the RX buffer space, decrement EPKTCNT ----
                 // last_estat capture belongs here, not a dedicated state: this
@@ -789,7 +880,6 @@ module net_stack #(
                 // own extra state for no real benefit -- rcr_rb simply holds
                 // stale data on those frames instead of a fresh ESTAT value.
                 S_CLEANUP1: begin
-                    last_estat <= rcr_rb;
                     wcr_addr   <= A_ECON1; wcr_data <= 8'h00;    // bank 0
                     ret_state  <= S_CLEANUP2;
                     state      <= S_WCR_OP;
@@ -873,12 +963,12 @@ module net_stack #(
                 S_MSGOPWAIT:
                     if (spi_done) state <= S_MSGCTRL_GO;
 
-                // Per-packet control byte (0x00: defer CRC to MACON3.TXCRCEN),
-                // same as the ARP path's leading byte in S_WBM_BOD_GO -- easy
-                // to miss since it isn't part of msg_hdr_byte's own 0..41
-                // range, but every WBM-written frame needs exactly one.
+                // Per-packet control byte, same 0x07 override as the ARP path
+                // (see the comment there) -- easy to miss since it isn't part
+                // of msg_hdr_byte's own 0..41 range, but every WBM-written
+                // frame needs exactly one.
                 S_MSGCTRL_GO: begin
-                    spi_tx    <= 8'h00;
+                    spi_tx    <= 8'h07;
                     spi_start <= 1'b1;
                     state     <= S_MSGCTRL_WT;
                 end

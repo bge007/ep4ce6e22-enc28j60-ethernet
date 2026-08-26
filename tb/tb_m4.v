@@ -159,7 +159,8 @@ module tb_m4;
         .rx_rd_addr(rx_rd_addr_dut), .rx_rd_data(rx_rd_data), .rx_updated(rx_updated),
         .frames_seen(frames_seen), .arp_replies_sent(arp_replies_sent),
         .last_eir(last_eir), .last_estat(last_estat),
-        .arp_reqs(), .last_etype()
+        .arp_reqs(), .last_etype(),
+        .tsv_count(), .tsv_wire(), .tsv_stat2(), .tsv_stat3()
     );
 
     enc28j60_buf_model4 model (
@@ -255,7 +256,10 @@ module tb_m4;
         start = 1'b1;
 
         wait (rx_updated == 1'b1);
-        #10_000;   // let cleanup finish
+        // rx_updated pulses in S_CLEANUP0, before the RX-buffer cleanup runs.
+        // frames_seen bumps in S_CLEANUP4, once it is genuinely done.
+        wait (frames_seen == 16'd1);
+        #2_000;
 
         check(frames_seen == 16'd1, "frames_seen != 1 after the UDP message");
         check(arp_replies_sent == 16'd0, "a UDP message must never trigger an ARP reply");
@@ -301,7 +305,7 @@ module tb_m4;
         #10_000;
 
         // ---- fixed header, byte-correct ----
-        check(model.buf_mem[16'h1A00] == 8'h00, "TX control byte is not 0x00");
+        check(model.buf_mem[16'h1A00] == 8'h07, "TX control byte is not 0x07 (POVERRIDE|PCRCEN|PPADEN)");
         check(model.buf_mem[16'h1A01] == PEER_MAC[47:40], "dest MAC[0] wrong");
         check(model.buf_mem[16'h1A06] == PEER_MAC[7:0],   "dest MAC[5] wrong");
         check(model.buf_mem[16'h1A07] == OUR_MAC[47:40],  "src MAC[0] wrong");
@@ -353,7 +357,8 @@ module tb_m4;
             reg [7:0] want [0:20];
             inject_udp_message(16'h0096, dut.next_rdpt, 32'hC0_A8_01_FF);
             wait (rx_updated == 1'b1);
-            #10_000;
+            wait (frames_seen == 16'd2);
+            #2_000;
             check(arp_replies_sent == 16'd0, "a broadcast UDP must not trigger an ARP reply");
             want[0]="H"; want[1]="I"; want[2]=" "; want[3]="F"; want[4]="R";
             want[5]="O"; want[6]="M"; want[7]=" "; want[8]="B";

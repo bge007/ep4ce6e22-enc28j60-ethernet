@@ -147,7 +147,8 @@ module tb_m3;
         .spi_rx(spi_rx), .spi_busy(spi_busy),
         .frames_seen(frames_seen), .arp_replies_sent(arp_replies_sent),
         .last_eir(last_eir), .last_estat(last_estat),
-        .arp_reqs(), .last_etype()
+        .arp_reqs(), .last_etype(),
+        .tsv_count(), .tsv_wire(), .tsv_stat2(), .tsv_stat3()
     );
 
     // spi_master itself has no chip-select notion (matching eth_top.v's
@@ -220,12 +221,17 @@ module tb_m3;
         start = 1'b1;
 
         wait (arp_replies_sent == 16'd1);
-        #10_000;   // let TXWAIT's fixed delay and cleanup finish
+        // arp_replies_sent bumps in S_TXWAIT, BEFORE the EIR/ESTAT/TSV reads
+        // and the RX-buffer cleanup. Wait on frames_seen, which bumps in
+        // S_CLEANUP4 once everything has actually finished -- a fixed delay
+        // here silently breaks whenever the post-TX sequence grows.
+        wait (frames_seen == 16'd1);
+        #2_000;
 
         check(frames_seen == 16'd1, "frames_seen != 1 after one ARP request");
 
         // ---- TX buffer: control byte + 42-byte reply, byte-correct ----
-        check(model.buf_mem[16'h1A00] == 8'h00, "TX control byte is not 0x00");
+        check(model.buf_mem[16'h1A00] == 8'h07, "TX control byte is not 0x07 (POVERRIDE|PCRCEN|PPADEN)");
         // dest MAC = sender's MAC
         check(model.buf_mem[16'h1A01] == SENDER_MAC[47:40], "reply dest MAC[0] wrong");
         check(model.buf_mem[16'h1A06] == SENDER_MAC[7:0],   "reply dest MAC[5] wrong");

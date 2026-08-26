@@ -68,6 +68,10 @@ module uart_console #(
     input  wire [7:0]  net_estat,    // ESTAT readback after the last TX attempt
     input  wire [15:0] net_arpreqs,  // frames parsed as an ARP request
     input  wire [15:0] net_etype,    // EtherType of the last frame walked
+    input  wire [15:0] net_tsvcount, // transmit status vector: byte count
+    input  wire [15:0] net_tsvwire,  //   "  bytes actually put on the wire
+    input  wire [7:0]  net_tsvs2,    //   "  done/CRC/length/collision-count
+    input  wire [7:0]  net_tsvs3,    //   "  defer/excess-coll/giant/underrun
 
     input  wire       uart_rx_pin,
     output wire       uart_tx_pin
@@ -112,8 +116,9 @@ module uart_console #(
     // ------------------------------------------------------------------
     // Transmit: banner, key state, or line echo
     // ------------------------------------------------------------------
-    localparam T_NONE     = 3'd0, T_BANNER   = 3'd1, T_KEYS = 3'd2, T_ECHO = 3'd3,
-               T_OLED_RDY = 3'd4, T_OLED_ERR = 3'd5, T_ETH = 3'd6, T_NET = 3'd7;
+    localparam T_NONE     = 4'd0, T_BANNER   = 4'd1, T_KEYS = 4'd2, T_ECHO = 4'd3,
+               T_OLED_RDY = 4'd4, T_OLED_ERR = 4'd5, T_ETH = 4'd6, T_NET = 4'd7,
+               T_TSV      = 4'd8;
 
     localparam integer BANNER_N   = 24;
     localparam integer KEYS_N     = 11;
@@ -122,6 +127,8 @@ module uart_console #(
     localparam integer OLED_ERR_N = 15;   // "OLED I2C NACK\r\n"
     localparam integer ETH_N      = 11;   // "ETH C1=xx\r\n"
     localparam integer NET_N      = 43;   // "NET F=xxxx R=xxxx E=xx S=xx A=xxxx T=xxxx\r\n"
+
+    localparam integer TSV_N      = 31;   // TSV n=xxxx w=xxxx s2=xx s3=xx + CRLF
 
     function [7:0] hexdig(input [3:0] n);
         hexdig = (n < 4'd10) ? (8'h30 + n) : (8'h41 + n - 4'd10);
@@ -150,11 +157,12 @@ module uart_console #(
         oled_err_msg[12]="K"; oled_err_msg[13]=8'h0D; oled_err_msg[14]=8'h0A;
     end
 
-    reg [2:0] cur;
+    reg [3:0] cur;
     reg [5:0] sidx;
     reg       req_banner, req_keys, req_echo, req_oled_rdy, req_oled_err, req_eth, req_net;
     reg       oled_ready_d, oled_nack_d, eth_ready_d;   // for edge detection
-    reg [15:0] net_frames_d, net_replies_d, net_arpreqs_d;
+    reg [15:0] net_frames_d, net_replies_d, net_arpreqs_d, net_tsvwire_d;
+    reg        req_tsv;
 
     wire [5:0] cur_len = (cur == T_BANNER)   ? BANNER_N[5:0]   :
                          (cur == T_KEYS)     ? KEYS_N[5:0]     :
@@ -162,6 +170,7 @@ module uart_console #(
                          (cur == T_OLED_ERR) ? OLED_ERR_N[5:0] :
                          (cur == T_ETH)      ? ETH_N[5:0]      :
                          (cur == T_NET)      ? NET_N[5:0]      :
+                         (cur == T_TSV)      ? TSV_N[5:0]      :
                                                ECHO_N[5:0];
 
     // "ETH C1=xx\r\n" -- ECON1 readback as hex.
@@ -237,6 +246,46 @@ module uart_console #(
         endcase
     end
 
+    // TSV line: the part's own account of the last transmission.
+    // last transmission. w= is the one that matters most: bytes actually put
+    // on the wire.
+    reg [7:0] tsv_byte;
+    always @(*) begin
+        case (sidx)
+            6'd0:  tsv_byte = "T";
+            6'd1:  tsv_byte = "S";
+            6'd2:  tsv_byte = "V";
+            6'd3:  tsv_byte = " ";
+            6'd4:  tsv_byte = "n";
+            6'd5:  tsv_byte = "=";
+            6'd6:  tsv_byte = hexdig(net_tsvcount[15:12]);
+            6'd7:  tsv_byte = hexdig(net_tsvcount[11:8]);
+            6'd8:  tsv_byte = hexdig(net_tsvcount[7:4]);
+            6'd9:  tsv_byte = hexdig(net_tsvcount[3:0]);
+            6'd10: tsv_byte = " ";
+            6'd11: tsv_byte = "w";
+            6'd12: tsv_byte = "=";
+            6'd13: tsv_byte = hexdig(net_tsvwire[15:12]);
+            6'd14: tsv_byte = hexdig(net_tsvwire[11:8]);
+            6'd15: tsv_byte = hexdig(net_tsvwire[7:4]);
+            6'd16: tsv_byte = hexdig(net_tsvwire[3:0]);
+            6'd17: tsv_byte = " ";
+            6'd18: tsv_byte = "s";
+            6'd19: tsv_byte = "2";
+            6'd20: tsv_byte = "=";
+            6'd21: tsv_byte = hexdig(net_tsvs2[7:4]);
+            6'd22: tsv_byte = hexdig(net_tsvs2[3:0]);
+            6'd23: tsv_byte = " ";
+            6'd24: tsv_byte = "s";
+            6'd25: tsv_byte = "3";
+            6'd26: tsv_byte = "=";
+            6'd27: tsv_byte = hexdig(net_tsvs3[7:4]);
+            6'd28: tsv_byte = hexdig(net_tsvs3[3:0]);
+            6'd29: tsv_byte = 8'h0D;
+            default: tsv_byte = 8'h0A;
+        endcase
+    end
+
     // "KEYS " then one character per button: its number if pressed, '.' if not.
     reg [7:0] keys_byte;
     always @(*) begin
@@ -277,6 +326,7 @@ module uart_console #(
                          : (cur == T_OLED_ERR) ? oled_err_msg[sidx[3:0]]
                          : (cur == T_ETH)      ? eth_byte
                          : (cur == T_NET)      ? net_byte
+                         : (cur == T_TSV)      ? tsv_byte
                                                : echo_byte;
 
     always @(posedge clk) begin
@@ -300,6 +350,8 @@ module uart_console #(
             net_frames_d  <= 16'd0;
             net_replies_d <= 16'd0;
             net_arpreqs_d <= 16'd0;
+            net_tsvwire_d <= 16'd0;
+            req_tsv       <= 1'b0;
             for (k = 0; k < MSG_LEN; k = k + 1) msg[k] <= 8'h20;
         end else begin
 
@@ -339,6 +391,12 @@ module uart_console #(
             net_frames_d  <= net_frames;
             net_replies_d <= net_replies;
             net_arpreqs_d <= net_arpreqs;
+            net_tsvwire_d <= net_tsvwire;
+            // Trigger on a completed transmission, not on the TSV value
+            // changing: if the part reports zero bytes on the wire every time,
+            // the value never changes and the line would never print -- which
+            // is exactly the case we most need to see.
+            if (net_replies != net_replies_d) req_tsv <= 1'b1;
             if (net_frames != net_frames_d || net_replies != net_replies_d
                 || net_arpreqs != net_arpreqs_d)
                 req_net <= 1'b1;
@@ -352,6 +410,7 @@ module uart_console #(
                 if      (req_banner)   begin cur <= T_BANNER;   req_banner   <= 1'b0; end
                 else if (req_eth)      begin cur <= T_ETH;      req_eth      <= 1'b0; end
                 else if (req_net)      begin cur <= T_NET;      req_net      <= 1'b0; end
+                else if (req_tsv)      begin cur <= T_TSV;      req_tsv      <= 1'b0; end
                 else if (req_oled_rdy) begin cur <= T_OLED_RDY; req_oled_rdy <= 1'b0; end
                 else if (req_oled_err) begin cur <= T_OLED_ERR; req_oled_err <= 1'b0; end
                 else if (req_echo)     begin cur <= T_ECHO;     req_echo     <= 1'b0; end

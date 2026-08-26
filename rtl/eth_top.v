@@ -106,6 +106,8 @@ module eth_top #(
     wire [15:0] eth_frames_seen, eth_arp_replies;
     wire [7:0]  eth_last_eir, eth_last_estat;
     wire [15:0] eth_arp_reqs, eth_last_etype;
+    wire [15:0] eth_tsv_count, eth_tsv_wire;
+    wire [7:0]  eth_tsv_s2, eth_tsv_s3;
 
     wire        mux_cs_n      = eth_ready ? net_cs_n      : m12_cs_n;
     wire        mux_spi_start = eth_ready ? net_spi_start : m12_spi_start;
@@ -144,7 +146,9 @@ module eth_top #(
         .rx_rd_addr(net_rx_rd_addr), .rx_rd_data(net_rx_rd_data), .rx_updated(net_rx_updated),
         .frames_seen(eth_frames_seen), .arp_replies_sent(eth_arp_replies),
         .last_eir(eth_last_eir), .last_estat(eth_last_estat),
-        .arp_reqs(eth_arp_reqs), .last_etype(eth_last_etype)
+        .arp_reqs(eth_arp_reqs), .last_etype(eth_last_etype),
+        .tsv_count(eth_tsv_count), .tsv_wire(eth_tsv_wire),
+        .tsv_stat2(eth_tsv_s2), .tsv_stat3(eth_tsv_s3)
     );
 
     assign enc_cs_n = mux_cs_n;
@@ -634,6 +638,8 @@ module eth_top #(
         .net_frames(eth_frames_seen), .net_replies(eth_arp_replies),
         .net_eir(eth_last_eir), .net_estat(eth_last_estat),
         .net_arpreqs(eth_arp_reqs), .net_etype(eth_last_etype),
+        .net_tsvcount(eth_tsv_count), .net_tsvwire(eth_tsv_wire),
+        .net_tsvs2(eth_tsv_s2), .net_tsvs3(eth_tsv_s3),
         .uart_rx_pin(uart_rx), .uart_tx_pin(uart_tx)
     );
 
