@@ -196,6 +196,11 @@ module tb_m2;
         check_reg(2'd2, 5'h0A, 8'hEE, "MAMXFLL (1518 low)");
         check_reg(2'd2, 5'h0B, 8'h05, "MAMXFLH (1518 high)");
 
+        // ---- PHY write via MII: PHCON2 = 0x0100 (HDLDIS), datasheet 6.6 ----
+        check_reg(2'd2, 5'h14, 8'h10, "MIREGADR (PHCON2 address)");
+        check_reg(2'd2, 5'h16, 8'h00, "MIWRL (PHCON2 low byte)");
+        check_reg(2'd2, 5'h17, 8'h01, "MIWRH (PHCON2 high byte = HDLDIS)");
+
         // ---- MAC address, bank 3, documented reversed file order ----
         check_reg(2'd3, 5'h00, 8'h00, "MAADR5 (byte 5 = 0x00)");
         check_reg(2'd3, 5'h01, 8'h01, "MAADR6 (byte 6 = HOST_ID = 0x01)");

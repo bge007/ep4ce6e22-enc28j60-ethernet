@@ -38,11 +38,43 @@ module eth_top #(
 );
 
     // ------------------------------------------------------------------
-    // reset sync
+    // reset: power-on reset OR the board's RESET button
+    //
+    // The POR half is not optional. Cyclone IV registers come out of
+    // configuration cleared, so rst_sync powered up to 2'b00 and `rst` was
+    // never asserted -- every reset block in the design was skipped, and
+    // every register whose reset value is NOT zero started life wrong:
+    //
+    //   oled_ssd1306.clear_pass  1 -> 0  display-on 0xAF never sent, panel
+    //                                    stays dark until RESET is pressed
+    //                                    (this is the "OLED only appears
+    //                                    after a reset press" symptom)
+    //   uart_console.req_banner  1 -> 0  no boot banner
+    //   eth_top.m12_cs_n         1 -> 0  ENC28J60 chip-select ASSERTED from
+    //   net_stack.cs_n           1 -> 0  configuration, so the first SPI
+    //                                    transaction has no framing CS edge
+    //   eth_top.last_shown    0xFF -> 0  minor: first OLED repaint trigger
+    //
+    // Pressing RESET repaired all of it at once, which is exactly why the
+    // board "worked" only after a button press. por_rst is initialised to 1
+    // and the counter to 0 in their declarations; Quartus encodes those
+    // power-up values into the configuration bitstream for Cyclone IV, so
+    // the reset is genuinely asserted from the first clock after config.
+    //
+    // 65536 cycles at 50 MHz is ~1.3 ms, comfortably longer than anything
+    // downstream needs to see a clean reset. (The OLED driver additionally
+    // runs its own 100 ms POR_TICKS delay before touching the panel.)
     // ------------------------------------------------------------------
+    reg [15:0] por_cnt = 16'd0;
+    reg        por_rst = 1'b1;
+    always @(posedge clk) begin
+        if (por_cnt != 16'hFFFF) por_cnt <= por_cnt + 16'd1;
+        else                     por_rst <= 1'b0;
+    end
+
     reg [1:0] rst_sync;
     always @(posedge clk) rst_sync <= {rst_sync[0], ~nrst};
-    wire rst = rst_sync[1];
+    wire rst = rst_sync[1] | por_rst;
 
     // Declared here (rather than down in the M2 section that actually sets
     // it) purely so the SPI mux and net_stack instantiation below can use it
@@ -147,6 +179,11 @@ module eth_top #(
     localparam [4:0] A_MABBIPG  = 5'h04;
     localparam [4:0] A_MAIPGL   = 5'h06, A_MAIPGH   = 5'h07;
     localparam [4:0] A_MAMXFLL  = 5'h0A, A_MAMXFLH  = 5'h0B;
+    // MII registers (bank 2) -- the only way to reach the PHY's own registers.
+    localparam [4:0] A_MIREGADR = 5'h14;
+    localparam [4:0] A_MIWRL    = 5'h16, A_MIWRH    = 5'h17;
+    // PHY register addresses (16-bit registers, written via the MII trio above)
+    localparam [7:0] PHY_PHCON2 = 8'h10;
     // bank 3 -- MAADR file order is NOT sequential with the logical MAC
     // address bytes; this mapping (5,6,3,4,1,2) is the documented quirk.
     localparam [4:0] A_MAADR5   = 5'h00, A_MAADR6   = 5'h01;
@@ -192,7 +229,7 @@ module eth_top #(
     // Final ECON1 writes double as "select bank N" + "keep RXEN set", since
     // RXEN and BSEL share the same register.
     // ------------------------------------------------------------------
-    localparam integer CFG_N = 30;
+    localparam integer CFG_N = 33;   // +3 for the PHCON2.HDLDIS MIIM write
     reg [7:0] cfg_op  [0:CFG_N-1];
     reg [7:0] cfg_dat [0:CFG_N-1];
     integer ci;
@@ -214,6 +251,32 @@ module eth_top #(
         cfg_op[ci]=WCR(A_ERXFCON);  cfg_dat[ci]=8'hA1; ci=ci+1;
         // -- bank 2: MAC config, half duplex to match the link (see above) --
         cfg_op[ci]=WCR(A_ECON1);    cfg_dat[ci]=8'h02; ci=ci+1; // bank 2
+
+        // ---- PHY: PHCON2.HDLDIS -- disable half-duplex loopback ----
+        // DATASHEET-CONFIRMED, section 6.6: "If using half duplex, the host
+        // controller may wish to set the PHCON2.HDLDIS bit to prevent
+        // automatic loopback of the data which is transmitted."
+        //
+        // Without it the PHY loops transmitted frames back internally in half
+        // duplex instead of driving them cleanly onto the wire, which explains
+        // BOTH long-standing symptoms at once: the Cisco 2960 counting
+        // InOctets on Gi1/0/13 while never completing a single valid frame
+        // (no FCS/runt/giant error, because no frame ever finishes), and
+        // net_stack's receive side racing through garbage -- it has been
+        // receiving our own transmissions looped back.
+        //
+        // PHY registers are not reachable over SPI directly; they go through
+        // the MII trio. Per datasheet 3.3.2: write MIREGADR, then MIWRL, then
+        // MIWRH -- writing MIWRH starts the transaction, so it must come last.
+        // All three are ordinary WCR writes, so this needs none of the
+        // MAC-type register *read* protocol that this project could never get
+        // working. The transaction takes 10.24 us; the eight MAC-config writes
+        // that immediately follow take longer than that at 12.5 MHz SPI, so
+        // they double as the required settle time, and nothing after this
+        // touches MIWRH again.
+        cfg_op[ci]=WCR(A_MIREGADR); cfg_dat[ci]=PHY_PHCON2; ci=ci+1; // PHCON2
+        cfg_op[ci]=WCR(A_MIWRL);    cfg_dat[ci]=8'h00;      ci=ci+1; // low byte
+        cfg_op[ci]=WCR(A_MIWRH);    cfg_dat[ci]=8'h01;      ci=ci+1; // HDLDIS = bit 8 -> 0x0100, starts MIIM
         cfg_op[ci]=WCR(A_MACON1);   cfg_dat[ci]=8'h01; ci=ci+1; // MARXEN
         cfg_op[ci]=WCR(A_MACON3);   cfg_dat[ci]=8'h32; ci=ci+1; // pad/CRC/half-dup
         // MACON4 = 0x40: DEFER (bit 6) set. DATASHEET-CONFIRMED, not a guess
