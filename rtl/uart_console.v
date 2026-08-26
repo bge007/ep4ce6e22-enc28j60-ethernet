@@ -66,6 +66,8 @@ module uart_console #(
     input  wire [15:0] net_replies,  // M3: ARP replies sent
     input  wire [7:0]  net_eir,      // EIR readback after the last TX attempt
     input  wire [7:0]  net_estat,    // ESTAT readback after the last TX attempt
+    input  wire [15:0] net_arpreqs,  // frames parsed as an ARP request
+    input  wire [15:0] net_etype,    // EtherType of the last frame walked
 
     input  wire       uart_rx_pin,
     output wire       uart_tx_pin
@@ -119,7 +121,7 @@ module uart_console #(
     localparam integer OLED_RDY_N = 12;   // "OLED READY\r\n"
     localparam integer OLED_ERR_N = 15;   // "OLED I2C NACK\r\n"
     localparam integer ETH_N      = 11;   // "ETH C1=xx\r\n"
-    localparam integer NET_N      = 29;   // "NET F=xxxx R=xxxx E=xx S=xx\r\n"
+    localparam integer NET_N      = 43;   // "NET F=xxxx R=xxxx E=xx S=xx A=xxxx T=xxxx\r\n"
 
     function [7:0] hexdig(input [3:0] n);
         hexdig = (n < 4'd10) ? (8'h30 + n) : (8'h41 + n - 4'd10);
@@ -152,7 +154,7 @@ module uart_console #(
     reg [5:0] sidx;
     reg       req_banner, req_keys, req_echo, req_oled_rdy, req_oled_err, req_eth, req_net;
     reg       oled_ready_d, oled_nack_d, eth_ready_d;   // for edge detection
-    reg [15:0] net_frames_d, net_replies_d;
+    reg [15:0] net_frames_d, net_replies_d, net_arpreqs_d;
 
     wire [5:0] cur_len = (cur == T_BANNER)   ? BANNER_N[5:0]   :
                          (cur == T_KEYS)     ? KEYS_N[5:0]     :
@@ -216,7 +218,21 @@ module uart_console #(
             6'd24: net_byte = "=";
             6'd25: net_byte = hexdig(net_estat[7:4]);
             6'd26: net_byte = hexdig(net_estat[3:0]);
-            6'd27: net_byte = 8'h0D;
+            6'd27: net_byte = " ";
+            6'd28: net_byte = "A";
+            6'd29: net_byte = "=";
+            6'd30: net_byte = hexdig(net_arpreqs[15:12]);
+            6'd31: net_byte = hexdig(net_arpreqs[11:8]);
+            6'd32: net_byte = hexdig(net_arpreqs[7:4]);
+            6'd33: net_byte = hexdig(net_arpreqs[3:0]);
+            6'd34: net_byte = " ";
+            6'd35: net_byte = "T";
+            6'd36: net_byte = "=";
+            6'd37: net_byte = hexdig(net_etype[15:12]);
+            6'd38: net_byte = hexdig(net_etype[11:8]);
+            6'd39: net_byte = hexdig(net_etype[7:4]);
+            6'd40: net_byte = hexdig(net_etype[3:0]);
+            6'd41: net_byte = 8'h0D;
             default: net_byte = 8'h0A;
         endcase
     end
@@ -283,6 +299,7 @@ module uart_console #(
             eth_ready_d  <= 1'b0;
             net_frames_d  <= 16'd0;
             net_replies_d <= 16'd0;
+            net_arpreqs_d <= 16'd0;
             for (k = 0; k < MSG_LEN; k = k + 1) msg[k] <= 8'h20;
         end else begin
 
@@ -321,7 +338,9 @@ module uart_console #(
 
             net_frames_d  <= net_frames;
             net_replies_d <= net_replies;
-            if (net_frames != net_frames_d || net_replies != net_replies_d)
+            net_arpreqs_d <= net_arpreqs;
+            if (net_frames != net_frames_d || net_replies != net_replies_d
+                || net_arpreqs != net_arpreqs_d)
                 req_net <= 1'b1;
 
             // ---- transmit -----------------------------------------------

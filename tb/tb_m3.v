@@ -146,7 +146,8 @@ module tb_m3;
         .cs_n(cs_n), .spi_start(spi_start), .spi_tx(spi_tx),
         .spi_rx(spi_rx), .spi_busy(spi_busy),
         .frames_seen(frames_seen), .arp_replies_sent(arp_replies_sent),
-        .last_eir(last_eir), .last_estat(last_estat)
+        .last_eir(last_eir), .last_estat(last_estat),
+        .arp_reqs(), .last_etype()
     );
 
     // spi_master itself has no chip-select notion (matching eth_top.v's

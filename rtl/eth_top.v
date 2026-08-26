@@ -73,6 +73,7 @@ module eth_top #(
     wire [7:0]  net_spi_tx;
     wire [15:0] eth_frames_seen, eth_arp_replies;
     wire [7:0]  eth_last_eir, eth_last_estat;
+    wire [15:0] eth_arp_reqs, eth_last_etype;
 
     wire        mux_cs_n      = eth_ready ? net_cs_n      : m12_cs_n;
     wire        mux_spi_start = eth_ready ? net_spi_start : m12_spi_start;
@@ -110,7 +111,8 @@ module eth_top #(
         .tx_rd_addr(net_tx_rd_addr), .tx_rd_data(net_tx_rd_data), .send_req(msg_updated),
         .rx_rd_addr(net_rx_rd_addr), .rx_rd_data(net_rx_rd_data), .rx_updated(net_rx_updated),
         .frames_seen(eth_frames_seen), .arp_replies_sent(eth_arp_replies),
-        .last_eir(eth_last_eir), .last_estat(eth_last_estat)
+        .last_eir(eth_last_eir), .last_estat(eth_last_estat),
+        .arp_reqs(eth_arp_reqs), .last_etype(eth_last_etype)
     );
 
     assign enc_cs_n = mux_cs_n;
@@ -214,7 +216,22 @@ module eth_top #(
         cfg_op[ci]=WCR(A_ECON1);    cfg_dat[ci]=8'h02; ci=ci+1; // bank 2
         cfg_op[ci]=WCR(A_MACON1);   cfg_dat[ci]=8'h01; ci=ci+1; // MARXEN
         cfg_op[ci]=WCR(A_MACON3);   cfg_dat[ci]=8'h32; ci=ci+1; // pad/CRC/half-dup
-        cfg_op[ci]=WCR(A_MACON4);   cfg_dat[ci]=8'h00; ci=ci+1;
+        // MACON4 = 0x40: DEFER (bit 6) set. DATASHEET-CONFIRMED, not a guess
+        // -- DS39662E section 6.5 step 3: "Configure the bits in MACON4. For
+        // conformance to the IEEE 802.3 standard, set the DEFER bit."
+        //
+        // This was 0x00 (DEFER clear) until 2026-08-27, and the datasheet says
+        // what that does in half duplex: "When the medium is occupied, the MAC
+        // will abort the transmission after the excessive deferral limit is
+        // reached." On a busy segment the medium is occupied constantly, so
+        // transmissions were aborting part-way through.
+        //
+        // That matches the Cisco 2960 port counters exactly: InOctets 1140 but
+        // InUcastPkts/InMcastPkts/InBcastPkts all 0, and Align-Err, FCS-Err,
+        // Rcv-Err, UnderSize, Runts and Giants ALL zero. Signal energy arrives
+        // and is counted, but no frame ever completes -- so there is nothing
+        // to classify as a CRC, runt or giant error.
+        cfg_op[ci]=WCR(A_MACON4);   cfg_dat[ci]=8'h40; ci=ci+1; // DEFER
         cfg_op[ci]=WCR(A_MABBIPG);  cfg_dat[ci]=8'h12; ci=ci+1; // half-duplex value
         cfg_op[ci]=WCR(A_MAIPGL);   cfg_dat[ci]=8'h12; ci=ci+1;
         cfg_op[ci]=WCR(A_MAIPGH);   cfg_dat[ci]=8'h0C; ci=ci+1;
@@ -553,6 +570,7 @@ module eth_top #(
         .eth_ready(eth_ready), .eth_econ1(econ1_rb),
         .net_frames(eth_frames_seen), .net_replies(eth_arp_replies),
         .net_eir(eth_last_eir), .net_estat(eth_last_estat),
+        .net_arpreqs(eth_arp_reqs), .net_etype(eth_last_etype),
         .uart_rx_pin(uart_rx), .uart_tx_pin(uart_tx)
     );
 

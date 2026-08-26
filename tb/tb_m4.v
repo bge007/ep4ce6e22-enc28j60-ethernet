@@ -158,7 +158,8 @@ module tb_m4;
         .tx_rd_addr(tx_rd_addr), .tx_rd_data(tx_rd_data), .send_req(send_req),
         .rx_rd_addr(rx_rd_addr_dut), .rx_rd_data(rx_rd_data), .rx_updated(rx_updated),
         .frames_seen(frames_seen), .arp_replies_sent(arp_replies_sent),
-        .last_eir(last_eir), .last_estat(last_estat)
+        .last_eir(last_eir), .last_estat(last_estat),
+        .arp_reqs(), .last_etype()
     );
 
     enc28j60_buf_model4 model (

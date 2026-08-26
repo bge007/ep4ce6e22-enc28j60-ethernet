@@ -69,6 +69,8 @@ module tb_uart;
     reg [15:0] net_replies_tb = 16'd0;
     reg [7:0]  net_eir_tb     = 8'd0;
     reg [7:0]  net_estat_tb   = 8'd0;
+    reg [15:0] net_arpreqs_tb = 16'd0;
+    reg [15:0] net_etype_tb   = 16'd0;
 
     uart_console #(.CLK_HZ(CLK_HZ), .BAUD(BAUD), .HOST_ID(8'd1)) dut (
         .clk(clk), .rst(rst),
@@ -78,6 +80,7 @@ module tb_uart;
         .eth_ready(eth_ready_tb), .eth_econ1(eth_econ1_tb),
         .net_frames(net_frames_tb), .net_replies(net_replies_tb),
         .net_eir(net_eir_tb), .net_estat(net_estat_tb),
+        .net_arpreqs(net_arpreqs_tb), .net_etype(net_etype_tb),
         .uart_rx_pin(host_rx), .uart_tx_pin(host_tx));
 
     // Collect everything the console transmits.

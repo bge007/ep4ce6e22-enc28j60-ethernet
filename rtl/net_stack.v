@@ -74,7 +74,16 @@ module net_stack #(
     // a transmitted ARP reply never reaches the far end despite net_stack's
     // own TXRTS-and-wait logic believing it succeeded every time.
     output reg  [7:0]   last_eir,
-    output reg  [7:0]   last_estat
+    output reg  [7:0]   last_estat,
+    // RX-parsing telemetry. Hardware showed frames_seen racing while
+    // arp_replies_sent stayed at zero, which does not say whether we are
+    // failing to SEE ARP requests or failing to MATCH them. These separate
+    // the two: arp_reqs counts frames parsed as an ARP request (whatever
+    // the target), and last_etype is the raw EtherType of the last frame
+    // walked -- if that is not 0x0806/0x0800 on a real network, the read
+    // pointer is misaligned and we are parsing garbage.
+    output reg  [15:0]  arp_reqs,
+    output reg  [15:0]  last_etype
 );
 
     // ------------------------------------------------------------------
@@ -390,6 +399,8 @@ module net_stack #(
             last_eir         <= 8'd0;
             last_estat       <= 8'd0;
             send_pending     <= 1'b0;
+            arp_reqs         <= 16'd0;
+            last_etype       <= 16'd0;
         end else if (!start && state == S_INIT0) begin
             // idle until eth_top hands off the bus
         end else begin
@@ -511,7 +522,13 @@ module net_stack #(
                 S_RBM_BOD_WT:
                     if (spi_done) begin
                         if (rxpos < 6'd14) begin
-                            if (rxpos == 6'd12) ethertype_hi08 <= (spi_rx == 8'h08);
+                            if (rxpos == 6'd12) begin
+                                ethertype_hi08     <= (spi_rx == 8'h08);
+                                last_etype[15:8]   <= spi_rx;
+                            end
+                            if (rxpos == 6'd13) begin
+                                last_etype[7:0] <= spi_rx;
+                            end
                             if (rxpos == 6'd13) begin
                                 is_arp <= ethertype_hi08 && (spi_rx == 8'h06);
                                 is_ip  <= ethertype_hi08 && (spi_rx == 8'h00);
@@ -589,6 +606,10 @@ module net_stack #(
                     // leaves at least one of these still 0.
                     if (is_ip && is_udp && dest_ip_is_us && is_our_port)
                         rx_updated <= 1'b1;
+                    // Telemetry: did we parse this as an ARP request at all,
+                    // regardless of whether its target IP matched us?
+                    if (is_arp && is_request)
+                        arp_reqs <= arp_reqs + 16'd1;
                     // Decide whether to reply *before* touching ECON1/ERXRDPT,
                     // so the branch below always lands correctly.
                     if (is_arp && is_request && target_is_us) begin
