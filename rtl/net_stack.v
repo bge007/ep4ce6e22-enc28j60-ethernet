@@ -99,6 +99,7 @@ module net_stack #(
     localparam [4:0] A_EIR     = 5'h1C, A_ESTAT = 5'h1D;   // common -- diagnostic only
     localparam [4:0] A_ERDPTL  = 5'h00, A_ERDPTH = 5'h01;  // bank 0
     localparam [4:0] A_EWRPTL  = 5'h02, A_EWRPTH = 5'h03;
+    localparam [4:0] A_ETXSTL  = 5'h04, A_ETXSTH = 5'h05;
     localparam [4:0] A_ETXNDL  = 5'h06, A_ETXNDH = 5'h07;
     localparam [4:0] A_ERXRDPTL= 5'h0C, A_ERXRDPTH= 5'h0D;
     localparam [4:0] A_EPKTCNT = 5'h19;                    // bank 1
@@ -230,7 +231,10 @@ module net_stack #(
                S_MSGBOD_GO  = 6'd47, S_MSGBOD_WT  = 6'd48,
                S_MSGETXND0  = 6'd49, S_MSGETXND1  = 6'd50,
                S_MSGTXRTS   = 6'd51, S_MSGTXWAIT  = 6'd52, S_MSGDONE = 6'd53,
-               S_MSGCTRL_GO = 6'd54, S_MSGCTRL_WT = 6'd55;
+               S_MSGCTRL_GO = 6'd54, S_MSGCTRL_WT = 6'd55,
+               // Re-arm ETXST after each TXRST pulse (see S_SETTXST0 below)
+               S_SETTXST0   = 6'd56, S_SETTXST1   = 6'd57,
+               S_MSGTXST0   = 6'd58, S_MSGTXST1   = 6'd59;
 
     reg [5:0]  state, ret_state;    // ret_state: where the generic WCR/RCR returns to
     reg [4:0]  wcr_addr;
@@ -682,6 +686,27 @@ module net_stack #(
                 end
                 S_TXRST1: begin
                     wcr_addr  <= A_ECON1; wcr_data <= 8'h04;   // TXRST=0, RXEN=1
+                    ret_state <= S_SETTXST0;
+                    state     <= S_WCR_OP;
+                end
+
+                // Re-arm ETXST after every TXRST pulse. ETXST is written once
+                // during M2 init and was never rewritten here, on the
+                // assumption it stays put -- but TXRST resets the transmit
+                // logic, and that plausibly includes the transmit start
+                // pointer. If it does, the part transmits from wherever ETXST
+                // landed (0x0000, i.e. the RX buffer) all the way to
+                // ETXND=0x1A3C: about 6.7 KB, which is precisely the
+                // oversized frame the switch counted as "1 giants" while
+                // rejecting every frame. Cheap to write, removes the
+                // assumption entirely.
+                S_SETTXST0: begin
+                    wcr_addr  <= A_ETXSTL; wcr_data <= ETXST[7:0];
+                    ret_state <= S_SETTXST1;
+                    state     <= S_WCR_OP;
+                end
+                S_SETTXST1: begin
+                    wcr_addr  <= A_ETXSTH; wcr_data <= ETXST[15:8];
                     ret_state <= S_SETWRPT0;
                     state     <= S_WCR_OP;
                 end
@@ -776,6 +801,17 @@ module net_stack #(
                 end
                 S_MSGTXRST1: begin
                     wcr_addr  <= A_ECON1; wcr_data <= 8'h04;    // TXRST=0, RXEN=1
+                    ret_state <= S_MSGTXST0;
+                    state     <= S_WCR_OP;
+                end
+                // Re-arm ETXST, same reason as S_SETTXST0 on the ARP path.
+                S_MSGTXST0: begin
+                    wcr_addr  <= A_ETXSTL; wcr_data <= ETXST[7:0];
+                    ret_state <= S_MSGTXST1;
+                    state     <= S_WCR_OP;
+                end
+                S_MSGTXST1: begin
+                    wcr_addr  <= A_ETXSTH; wcr_data <= ETXST[15:8];
                     ret_state <= S_MSGWRPT0;
                     state     <= S_WCR_OP;
                 end
