@@ -594,10 +594,20 @@ module net_stack #(
                     end
                 end
 
-                // ---- ARP reply: switch to bank 0, point EWRPT at TX start ----
+                // ---- ARP reply: bank 0, reset TX logic, then build the frame ----
+                // ORDER MATTERS. The TXRST pulse comes FIRST, before EWRPT and
+                // ETXND are loaded, because resetting the transmit logic also
+                // resets the transmit pointer registers -- pulsing it after
+                // loading them (as this originally did) clobbers the length
+                // and the part sends a bogus frame while still reporting
+                // success. Real evidence, 2026-08-24: with TXRST last, EIR
+                // read back TXIF=1 (transmission complete, no error flags) on
+                // every attempt, yet a Cisco L2 switch never learned either
+                // board's MAC address -- i.e. not one valid frame ever
+                // reached the wire.
                 S_TX_BANK: begin
                     wcr_addr  <= A_ECON1; wcr_data <= 8'h00;    // bank 0
-                    ret_state <= S_SETWRPT0;
+                    ret_state <= S_TXRST0;
                     state     <= S_WCR_OP;
                 end
                 S_SETWRPT0: begin
@@ -649,27 +659,30 @@ module net_stack #(
                 end
                 S_SETETXND1: begin
                     wcr_addr  <= A_ETXNDH; wcr_data <= ARP_ETXND[15:8];
-                    ret_state <= S_TXRST0;
+                    ret_state <= S_TXRTS;
                     state     <= S_WCR_OP;
                 end
 
                 // Documented ENC28J60 errata: the transmit logic can get
                 // corrupted after a transmission (successful or not) and must
                 // be reset -- ECON1.TXRST pulsed high then low -- before every
-                // subsequent TX, not just the first. Real-hardware evidence
-                // for exactly this (2026-08-24): EIR read back after every TX
-                // attempt never once showed TXIF (bit3, "transmission
-                // complete") set across dozens of attempts, with no TXERIF/
-                // TXABRT/LATECOL error bit set either -- consistent with the
-                // transmit logic being wedged rather than erroring out.
+                // subsequent TX, not just the first. Adding this is what first
+                // got TXIF to set at all (before it, the TX engine sat wedged
+                // and never reported completion).
+                //
+                // Both writes keep RXEN set: a plain WCR overwrites the whole
+                // register, so clearing it here would disable the receiver for
+                // the entire buffer-write that follows and drop frames arriving
+                // in that window. (A real driver would use the bit-set/bit-clear
+                // opcodes to touch only TXRST; this design only implements WCR.)
                 S_TXRST0: begin
-                    wcr_addr  <= A_ECON1; wcr_data <= 8'h80;   // TXRST=1
+                    wcr_addr  <= A_ECON1; wcr_data <= 8'h84;   // TXRST=1, RXEN=1
                     ret_state <= S_TXRST1;
                     state     <= S_WCR_OP;
                 end
                 S_TXRST1: begin
-                    wcr_addr  <= A_ECON1; wcr_data <= 8'h00;   // TXRST=0
-                    ret_state <= S_TXRTS;
+                    wcr_addr  <= A_ECON1; wcr_data <= 8'h04;   // TXRST=0, RXEN=1
+                    ret_state <= S_SETWRPT0;
                     state     <= S_WCR_OP;
                 end
 
@@ -749,8 +762,20 @@ module net_stack #(
                 // ARP reply's bank/pointer/TXRST/TXRTS sequence, but starts
                 // fresh from S_POLL_CHECK instead of RX cleanup, and returns
                 // to S_INIT1 itself (no RX buffer pointers to restore).
+                // Same ordering rule as the ARP path above: TXRST pulse FIRST,
+                // then load EWRPT, then write the frame, then ETXND, then TXRTS.
                 S_MSGBANK: begin
                     wcr_addr  <= A_ECON1; wcr_data <= 8'h00;    // bank 0
+                    ret_state <= S_MSGTXRST0;
+                    state     <= S_WCR_OP;
+                end
+                S_MSGTXRST0: begin
+                    wcr_addr  <= A_ECON1; wcr_data <= 8'h84;    // TXRST=1, RXEN=1
+                    ret_state <= S_MSGTXRST1;
+                    state     <= S_WCR_OP;
+                end
+                S_MSGTXRST1: begin
+                    wcr_addr  <= A_ECON1; wcr_data <= 8'h04;    // TXRST=0, RXEN=1
                     ret_state <= S_MSGWRPT0;
                     state     <= S_WCR_OP;
                 end
@@ -761,16 +786,6 @@ module net_stack #(
                 end
                 S_MSGWRPT1: begin
                     wcr_addr  <= A_EWRPTH; wcr_data <= ETXST[15:8];
-                    ret_state <= S_MSGTXRST0;
-                    state     <= S_WCR_OP;
-                end
-                S_MSGTXRST0: begin
-                    wcr_addr  <= A_ECON1; wcr_data <= 8'h80;    // TXRST=1
-                    ret_state <= S_MSGTXRST1;
-                    state     <= S_WCR_OP;
-                end
-                S_MSGTXRST1: begin
-                    wcr_addr  <= A_ECON1; wcr_data <= 8'h00;    // TXRST=0
                     ret_state <= S_MSGOP;
                     state     <= S_WCR_OP;
                 end

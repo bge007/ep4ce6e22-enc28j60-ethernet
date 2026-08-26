@@ -123,7 +123,7 @@ function Program-Board([switch]$ToFlash) {
     }
     $env:PATH = "$QUARTUS;$env:PATH"
     quartus_cpf -c $sof $rbf
-    if (-not $?) { throw "sof -> rbf conversion failed" }
+    if ($LASTEXITCODE -ne 0) { throw "sof -> rbf conversion failed" }
 
     if ($ToFlash) {
         Write-Host "=== Programming config flash (non-volatile) ===" -ForegroundColor Cyan
@@ -134,7 +134,7 @@ function Program-Board([switch]$ToFlash) {
         Write-Host "=== Programming board (SRAM, volatile) ===" -ForegroundColor Cyan
         & $LOADER -c usb-blaster $rbf
     }
-    if (-not $?) { throw "Programming failed -- check WinUSB driver via zadig" }
+    if ($LASTEXITCODE -ne 0) { throw "Programming failed -- check WinUSB driver via zadig" }
 }
 
 # ---- program only, from the existing .sof -------------------------------
@@ -158,7 +158,7 @@ if ($willSimulate) {
              ../rtl/uart_tx.v ../rtl/uart_rx.v ../rtl/uart_console.v `
              ../rtl/debounce.v ../rtl/net_stack.v ../rtl/eth_top.v `
              ../tb/tb_m1.v ../tb/tb_m2.v ../tb/tb_m3.v ../tb/tb_m4.v ../tb/tb_oled.v ../tb/tb_uart.v
-    if (-not $?) { throw "vlog failed" }
+    if ($LASTEXITCODE -ne 0) { throw "vlog failed" }
 
     foreach ($tb in @("tb_m1", "tb_m2", "tb_m3", "tb_m4", "tb_oled", "tb_uart")) {
         Write-Host "--- $tb ---" -ForegroundColor DarkCyan
@@ -179,7 +179,7 @@ $env:PATH = "$QUARTUS;$env:PATH"
 # every revision alike.
 Copy-Item rtl\font5x8.mem . -Force
 quartus_sh --flow compile enc28j60_eth -c $REVISION
-if (-not $?) { throw "Quartus compile failed -- see $OUTDIR\*.rpt" }
+if ($LASTEXITCODE -ne 0) { throw "Quartus compile failed -- see $OUTDIR\*.rpt" }
 
 Select-String -Path "$OUTDIR\$REVISION.fit.rpt" `
     -Pattern "Total logic elements|Total registers|Total pins" |
