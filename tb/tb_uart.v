@@ -71,6 +71,7 @@ module tb_uart;
     reg [7:0]  net_estat_tb   = 8'd0;
     reg [15:0] net_arpreqs_tb = 16'd0;
     reg [15:0] net_etype_tb   = 16'd0;
+    reg [15:0] net_resyncs_tb  = 16'd0;
     reg [15:0] net_tsvcount_tb = 16'd0;
     reg [15:0] net_tsvwire_tb  = 16'd0;
     reg [7:0]  net_tsvs2_tb     = 8'd0;
@@ -85,6 +86,7 @@ module tb_uart;
         .net_frames(net_frames_tb), .net_replies(net_replies_tb),
         .net_eir(net_eir_tb), .net_estat(net_estat_tb),
         .net_arpreqs(net_arpreqs_tb), .net_etype(net_etype_tb),
+        .net_resyncs(net_resyncs_tb),
         .net_tsvcount(net_tsvcount_tb), .net_tsvwire(net_tsvwire_tb),
         .net_tsvs2(net_tsvs2_tb), .net_tsvs3(net_tsvs3_tb),
         .uart_rx_pin(host_rx), .uart_tx_pin(host_tx));

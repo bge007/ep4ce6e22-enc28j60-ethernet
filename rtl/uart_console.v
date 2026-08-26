@@ -68,6 +68,7 @@ module uart_console #(
     input  wire [7:0]  net_estat,    // ESTAT readback after the last TX attempt
     input  wire [15:0] net_arpreqs,  // frames parsed as an ARP request
     input  wire [15:0] net_etype,    // EtherType of the last frame walked
+    input  wire [15:0] net_resyncs,  // RX pointer-chain rebuilds
     input  wire [15:0] net_tsvcount, // transmit status vector: byte count
     input  wire [15:0] net_tsvwire,  //   "  bytes actually put on the wire
     input  wire [7:0]  net_tsvs2,    //   "  done/CRC/length/collision-count
@@ -126,7 +127,7 @@ module uart_console #(
     localparam integer OLED_RDY_N = 12;   // "OLED READY\r\n"
     localparam integer OLED_ERR_N = 15;   // "OLED I2C NACK\r\n"
     localparam integer ETH_N      = 11;   // "ETH C1=xx\r\n"
-    localparam integer NET_N      = 43;   // "NET F=xxxx R=xxxx E=xx S=xx A=xxxx T=xxxx\r\n"
+    localparam integer NET_N      = 51;   // "NET F=xxxx R=xxxx E=xx S=xx A=xxxx T=xxxx\r\n"
 
     localparam integer TSV_N      = 31;   // TSV n=xxxx w=xxxx s2=xx s3=xx + CRLF
 
@@ -241,7 +242,14 @@ module uart_console #(
             6'd38: net_byte = hexdig(net_etype[11:8]);
             6'd39: net_byte = hexdig(net_etype[7:4]);
             6'd40: net_byte = hexdig(net_etype[3:0]);
-            6'd41: net_byte = 8'h0D;
+            6'd41: net_byte = " ";
+            6'd42: net_byte = "X";
+            6'd43: net_byte = "=";
+            6'd44: net_byte = hexdig(net_resyncs[15:12]);
+            6'd45: net_byte = hexdig(net_resyncs[11:8]);
+            6'd46: net_byte = hexdig(net_resyncs[7:4]);
+            6'd47: net_byte = hexdig(net_resyncs[3:0]);
+            6'd48: net_byte = 8'h0D;
             default: net_byte = 8'h0A;
         endcase
     end

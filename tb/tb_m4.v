@@ -160,7 +160,7 @@ module tb_m4;
         .frames_seen(frames_seen), .arp_replies_sent(arp_replies_sent),
         .last_eir(last_eir), .last_estat(last_estat),
         .arp_reqs(), .last_etype(),
-        .tsv_count(), .tsv_wire(), .tsv_stat2(), .tsv_stat3()
+        .rx_resyncs(), .tsv_count(), .tsv_wire(), .tsv_stat2(), .tsv_stat3()
     );
 
     enc28j60_buf_model4 model (

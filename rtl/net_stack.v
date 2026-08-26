@@ -90,6 +90,7 @@ module net_stack #(
     // physically left the chip, which no amount of switch-side counting can
     // tell us. tsv_stat2/3 carry Transmit Done, CRC/length errors, collision
     // count, defer, giant and underrun.
+    output reg  [15:0]  rx_resyncs,   // times the RX pointer chain was rebuilt
     output reg  [15:0]  tsv_count,
     output reg  [15:0]  tsv_wire,
     output reg  [7:0]   tsv_stat2,
@@ -410,7 +411,25 @@ module net_stack #(
     // Documented ENC28J60 workaround: one less than the next-packet pointer,
     // unless that pointer is the start of the buffer, in which case use the
     // end instead (avoids ERXRDPT ever landing one before ERXST).
-    wire [15:0] next_erxrdpt = (cur_next_ptr == ERXST) ? ERXND : (cur_next_ptr - 16'd1);
+    // The per-packet "next packet pointer" is the only thing keeping the read
+    // side aligned: each packet is read from wherever the previous one said
+    // the next begins. So one bad value desyncs the chain permanently -- from
+    // then on the "header" is really packet payload, every EtherType is
+    // nonsense, and nothing is ever recognised again.
+    //
+    // Seen on hardware 2026-08-27: Host B ran correctly for a while, then
+    // frames_seen kept racing while arp_reqs froze and last_etype degenerated
+    // to garbage (D87E, 0001, ...). It dropped out of the switch's MAC table
+    // and only a reset brought it back. Host A behaved identically given
+    // enough traffic.
+    //
+    // A pointer outside the RX FIFO is provably corrupt, so treat it as a
+    // resync point: rebuild the chain at ERXST and hand the whole buffer back
+    // to the hardware, instead of chasing the bad pointer forever.
+    wire        next_ptr_ok  = (cur_next_ptr <= ERXND);
+    wire [15:0] next_erxrdpt = (!next_ptr_ok)              ? ERXND :
+                               (cur_next_ptr == ERXST)     ? ERXND :
+                                                             (cur_next_ptr - 16'd1);
 
     assign rx_rd_data = udp_payload[rx_rd_addr];
 
@@ -436,6 +455,7 @@ module net_stack #(
             send_pending     <= 1'b0;
             arp_reqs         <= 16'd0;
             last_etype       <= 16'd0;
+            rx_resyncs       <= 16'd0;
             tsv_count        <= 16'd0;
             tsv_wire         <= 16'd0;
             tsv_stat2        <= 8'd0;
@@ -902,7 +922,8 @@ module net_stack #(
                 // already does exactly "select bank 1, then go poll" -- reuse
                 // it here instead of adding a new state just to repeat it.
                 S_CLEANUP4: begin
-                    next_rdpt   <= cur_next_ptr;
+                    next_rdpt   <= next_ptr_ok ? cur_next_ptr : ERXST;
+                    if (!next_ptr_ok) rx_resyncs <= rx_resyncs + 16'd1;
                     frames_seen <= frames_seen + 16'd1;
                     wcr_addr    <= A_ECON2; wcr_data <= 8'hC0;   // AUTOINC + PKTDEC
                     ret_state   <= S_INIT1;
