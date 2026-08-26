@@ -503,6 +503,15 @@ module net_stack #(
                     end
 
                 // ---- point ERDPT at this packet's header ----
+                // These bank-0 selects write 0x00, which also clears RXEN
+                // (bit 2) -- a plain WCR overwrites the whole register. Keeping
+                // RXEN set here instead (0x04) was TRIED on hardware 2026-08-27
+                // and made things measurably WORSE: a freshly reset node went
+                // from A=0003/R=0001/X=0000 (working) to A=0000 with rx_resyncs
+                // climbing about once every two frames, never recognising a
+                // single ARP request. Reverted. Leaving the receiver disabled
+                // during the pointer updates is evidently what this part wants,
+                // so do not "fix" this again without hardware evidence.
                 S_SETRDPT0: begin
                     wcr_addr  <= A_ECON1; wcr_data <= 8'h00;    // bank 0
                     ret_state <= S_SETRDPT1;
