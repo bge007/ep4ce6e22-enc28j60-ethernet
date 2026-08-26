@@ -162,24 +162,30 @@ module eth_top #(
     // RX buffer 0x0000-0x19FF (6.5 KB), TX from 0x1A00, matching plan.md.
     // ERXRDPT = ERXND = 0x19FF, which already satisfies the errata requiring
     // an odd address (0x19FF is odd) with no extra work.
-    // MACON3 = 0x33: pad to 60B + CRC + frame-length check, FULL duplex
-    // (FULDPX=1). Originally shipped as half duplex (0x32) on the theory that
-    // leaving PHCON1 untouched would leave the PHY at a matching default --
-    // but this project has no ENC28J60 datasheet to confirm that default,
-    // and M3 hardware testing (2026-08-23) points at a MAC/PHY duplex
-    // mismatch: net_stack's own counters show ARP replies being generated
-    // and "sent" every time, both link LEDs (module + switch port) are lit,
-    // but the reply never reaches the PC (no ARP cache entry ever appears).
-    // That signature -- transmit believed complete, frame never actually
-    // lands -- is the classic duplex-mismatch symptom. Since every modern
-    // switch auto-negotiates full duplex given the chance, matching the MAC
-    // to full duplex (without touching the PHY at all, which would need an
-    // untested MII/PHCON1 write) is the cheap, low-risk experiment: if the
-    // PHY's own default was already auto-negotiating full duplex against the
-    // switch, this removes the mismatch entirely.
-    // MABBIPG follows: 0x15 is the datasheet-documented full-duplex value
-    // (half-duplex used 0x12 + a MAIPGH write that only matters for half
-    // duplex; MAIPGH is left in place below, harmless when unused).
+    // MACON3 = 0x32: pad to 60B + CRC + frame-length check, HALF duplex
+    // (FULDPX=0), with MABBIPG = 0x12, the half-duplex back-to-back gap.
+    //
+    // These were briefly set to 0x33 / 0x15 (full duplex) on 2026-08-23 while
+    // testing a duplex-mismatch theory, and wrongly left that way when it did
+    // not immediately fix anything. Reverted 2026-08-26 on direct evidence
+    // from the Cisco 2960 the boards are attached to:
+    //
+    //     Gi1/0/13  connected  1  a-half  a-10
+    //     Half-duplex, 10Mb/s, media type is 10/100/1000BaseTX
+    //
+    // The link really is half duplex, and the ENC28J60's own PHY is at its
+    // half-duplex default because nothing here ever writes PHCON1.PDPXMD.
+    // Leaving the MAC in full duplex therefore created a duplex mismatch
+    // *inside the chip*, which the part requires to match (MACON3.FULDPX and
+    // PHCON1.PDPXMD must agree). The switch port counters show exactly what
+    // that produces: 0 valid packets input, 0 runts, 0 CRC errors, but
+    // "1 giants / 1 input errors" -- frames are physically reaching the
+    // switch and being rejected as OVERSIZED, which is what a wrong
+    // inter-packet gap does when frames run together.
+    //
+    // If full duplex is ever wanted (direct crossover cable, no switch), both
+    // MACON3.FULDPX and PHCON1.PDPXMD must be set together -- and PHCON1 is a
+    // PHY register reached over MIIM, which this design does not implement.
     // MAC address 02:42:CE:60:00:<HOST_ID>, locally administered.
     // Final ECON1 writes double as "select bank N" + "keep RXEN set", since
     // RXEN and BSEL share the same register.
@@ -204,12 +210,12 @@ module eth_top #(
         //    avoid the pattern-match filter per errata) --
         cfg_op[ci]=WCR(A_ECON1);    cfg_dat[ci]=8'h01; ci=ci+1; // bank 1
         cfg_op[ci]=WCR(A_ERXFCON);  cfg_dat[ci]=8'hA1; ci=ci+1;
-        // -- bank 2: MAC config, full duplex (see comment above) --
+        // -- bank 2: MAC config, half duplex to match the link (see above) --
         cfg_op[ci]=WCR(A_ECON1);    cfg_dat[ci]=8'h02; ci=ci+1; // bank 2
         cfg_op[ci]=WCR(A_MACON1);   cfg_dat[ci]=8'h01; ci=ci+1; // MARXEN
-        cfg_op[ci]=WCR(A_MACON3);   cfg_dat[ci]=8'h33; ci=ci+1; // pad/CRC/full-dup
+        cfg_op[ci]=WCR(A_MACON3);   cfg_dat[ci]=8'h32; ci=ci+1; // pad/CRC/half-dup
         cfg_op[ci]=WCR(A_MACON4);   cfg_dat[ci]=8'h00; ci=ci+1;
-        cfg_op[ci]=WCR(A_MABBIPG);  cfg_dat[ci]=8'h15; ci=ci+1; // full-duplex value
+        cfg_op[ci]=WCR(A_MABBIPG);  cfg_dat[ci]=8'h12; ci=ci+1; // half-duplex value
         cfg_op[ci]=WCR(A_MAIPGL);   cfg_dat[ci]=8'h12; ci=ci+1;
         cfg_op[ci]=WCR(A_MAIPGH);   cfg_dat[ci]=8'h0C; ci=ci+1;
         cfg_op[ci]=WCR(A_MAMXFLL);  cfg_dat[ci]=8'hEE; ci=ci+1; // 1518

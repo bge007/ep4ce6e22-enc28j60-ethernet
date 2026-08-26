@@ -11,8 +11,9 @@
 // Checks:
 //   * RX buffer:  ERXST=0x0000, ERXND=0x19FF, ERXRDPT=0x19FF, ETXST=0x1A00
 //   * bank 1:     ERXFCON = 0xA1 (unicast+broadcast+CRC, no pattern match)
-//   * bank 2:     MACON1=0x01, MACON3=0x33 (full duplex), MACON4=0x00,
-//                 MABBIPG=0x15, MAIPGL=0x12, MAIPGH=0x0C, MAMXFL=0x05EE
+//   * bank 2:     MACON1=0x01, MACON3=0x32 (half duplex, matching the
+//                 link the switch actually negotiates), MACON4=0x00,
+//                 MABBIPG=0x12, MAIPGL=0x12, MAIPGH=0x0C, MAMXFL=0x05EE
 //   * bank 3:     MAC address 02:42:CE:60:00:01, correctly placed at the
 //                 documented MAADR5/6/3/4/1/2 file order
 //   * ECON1 ends with RXEN=1 and bank=3 (bits 0x07)
@@ -187,9 +188,9 @@ module tb_m2;
 
         // ---- MAC config, bank 2 ----
         check_reg(2'd2, 5'h00, 8'h01, "MACON1 (MARXEN)");
-        check_reg(2'd2, 5'h02, 8'h33, "MACON3 (pad/CRC/full-duplex)");
+        check_reg(2'd2, 5'h02, 8'h32, "MACON3 (pad/CRC/half-duplex)");
         check_reg(2'd2, 5'h03, 8'h00, "MACON4");
-        check_reg(2'd2, 5'h04, 8'h15, "MABBIPG (full-duplex value)");
+        check_reg(2'd2, 5'h04, 8'h12, "MABBIPG (half-duplex value)");
         check_reg(2'd2, 5'h06, 8'h12, "MAIPGL");
         check_reg(2'd2, 5'h07, 8'h0C, "MAIPGH");
         check_reg(2'd2, 5'h0A, 8'hEE, "MAMXFLL (1518 low)");
