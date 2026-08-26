@@ -194,7 +194,8 @@ module tb_m4;
 
     // Inject a synthetic UDP datagram addressed to OUR_IP:1234, matching
     // what real hardware would have delivered into the RX buffer.
-    task inject_udp_message(input [15:0] next_ptr, input [15:0] base_addr);
+    task inject_udp_message(input [15:0] next_ptr, input [15:0] base_addr,
+                            input [31:0] dst_ip);
         integer i;
         reg [7:0] frame [0:62];
         reg [7:0] rx_payload [0:20];
@@ -223,8 +224,8 @@ module tb_m4;
             frame[24]=8'h00; frame[25]=8'h00;                     // header checksum (unchecked by dut)
             frame[26]=PEER_IP[31:24]; frame[27]=PEER_IP[23:16];   // source IP
             frame[28]=PEER_IP[15:8];  frame[29]=PEER_IP[7:0];
-            frame[30]=OUR_IP[31:24];  frame[31]=OUR_IP[23:16];    // dest IP = us
-            frame[32]=OUR_IP[15:8];   frame[33]=OUR_IP[7:0];
+            frame[30]=dst_ip[31:24];  frame[31]=dst_ip[23:16];    // dest IP
+            frame[32]=dst_ip[15:8];   frame[33]=dst_ip[7:0];
             frame[34]=8'h04; frame[35]=8'hD2;                     // UDP src port
             frame[36]=8'h04; frame[37]=8'hD2;                     // UDP dst port = 1234
             frame[38]=8'h00; frame[39]=8'd29;                     // UDP length
@@ -249,7 +250,7 @@ module tb_m4;
         // ------------------------------------------------------------
         // Scenario 1: RECEIVE a UDP message addressed to us.
         // ------------------------------------------------------------
-        inject_udp_message(16'h0032, 16'h0000);
+        inject_udp_message(16'h0032, 16'h0000, OUR_IP);
         #40;
         start = 1'b1;
 
@@ -341,8 +342,36 @@ module tb_m4;
 
         $display("INFO: scenario 2 (UDP send) complete, errors so far = %0d", errors);
 
+        // ------------------------------------------------------------
+        // Scenario 3: a BROADCAST UDP message must also be accepted.
+        // This is what lets a PC drive the OLED while the transmit path
+        // is still under investigation -- receive is known good on
+        // hardware, so broadcast needs no transmission from the board.
+        // ------------------------------------------------------------
+        begin : bcast
+            integer i;
+            reg [7:0] want [0:20];
+            inject_udp_message(16'h0096, dut.next_rdpt, 32'hC0_A8_01_FF);
+            wait (rx_updated == 1'b1);
+            #10_000;
+            check(arp_replies_sent == 16'd0, "a broadcast UDP must not trigger an ARP reply");
+            want[0]="H"; want[1]="I"; want[2]=" "; want[3]="F"; want[4]="R";
+            want[5]="O"; want[6]="M"; want[7]=" "; want[8]="B";
+            for (i = 9; i < 21; i = i + 1) want[i] = 8'h20;
+            for (i = 0; i < 21; i = i + 1) begin
+                rx_rd_addr = i[4:0];
+                #1;
+                if (rx_rd_data !== want[i]) begin
+                    $display("FAIL: broadcast payload byte %0d is 0x%02h, expected 0x%02h",
+                             i, rx_rd_data, want[i]);
+                    errors = errors + 1;
+                end
+            end
+        end
+        $display("INFO: scenario 3 (broadcast UDP receive) complete, errors so far = %0d", errors);
+
         if (errors == 0)
-            $display("PASS: UDP receive (payload byte-correct, no spurious reply) and UDP send (byte-correct header/checksum/payload, ETXND, TXRTS) both correct");
+            $display("PASS: UDP receive (unicast + broadcast, payload byte-correct, no spurious reply) and UDP send (byte-correct header/checksum/payload, ETXND, TXRTS) all correct");
         else
             $display("%0d ERROR(S)", errors);
         $finish;

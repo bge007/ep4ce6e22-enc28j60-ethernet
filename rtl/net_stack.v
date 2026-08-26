@@ -140,6 +140,22 @@ module net_stack #(
     localparam integer MSG_TX_LEN  = MSG_HDR_LEN + MSG_LEN;        // 63
     localparam [15:0]  MSG_ETXND   = ETXST + MSG_TX_LEN[15:0];
     localparam [15:0]  UDP_PORT    = 16'd1234;                     // 0x04D2
+
+    // A UDP message is accepted if it is addressed to us OR broadcast. The
+    // broadcast path is what makes the display usable while the transmit side
+    // is still broken: receiving is confirmed working on hardware (the
+    // ENC28J60's activity LED blinks, frames_seen climbs, EtherType decodes
+    // as 0806/0800), so a PC broadcasting to port 1234 can drive the OLED
+    // without the board needing to transmit anything at all.
+    //
+    // Broadcast frames already pass the MAC filter -- ERXFCON is 0xA1, which
+    // has BCEN set (see eth_top.v's cfg table).
+    localparam [31:0] IP_BCAST_LIMITED = 32'hFFFF_FFFF;            // 255.255.255.255
+    localparam [31:0] IP_BCAST_SUBNET  = {OUR_IP[31:8], 8'hFF};    // e.g. 192.168.1.255
+
+    function dest_accept(input [31:0] d);
+        dest_accept = (d == OUR_IP) || (d == IP_BCAST_LIMITED) || (d == IP_BCAST_SUBNET);
+    endfunction
     localparam [15:0]  IP_TOTAL_LEN = 16'd20 + 16'd8 + MSG_LEN[15:0]; // 49
 
     // IPv4 header checksum: ones'-complement sum of the header's 16-bit
@@ -208,7 +224,7 @@ module net_stack #(
     reg [5:0]  txpos;          // 0..63 likewise
     reg [7:0]  hdr_byte_idx;   // 0..5, the 6-byte per-packet RX header
     reg        is_arp, is_request, target_is_us;
-    reg        is_ip, is_udp, dest_ip_is_us, is_our_port;
+    reg        is_ip, is_udp, dest_ip_is_us, is_our_port;  // dest_ip_is_us: ours OR broadcast
     reg        ethertype_hi08;   // scratch: high byte of EtherType was 0x08
     reg [7:0]  udp_payload [0:MSG_LEN-1];
 
@@ -539,7 +555,7 @@ module net_stack #(
                                 6'd30: target_ip[31:24] <= spi_rx;
                                 6'd31: target_ip[23:16] <= spi_rx;
                                 6'd32: target_ip[15:8]  <= spi_rx;
-                                6'd33: dest_ip_is_us    <= ({target_ip[31:8], spi_rx} == OUR_IP);
+                                6'd33: dest_ip_is_us    <= dest_accept({target_ip[31:8], spi_rx});
                                 6'd36: is_our_port      <= (spi_rx == UDP_PORT[15:8]);
                                 6'd37: is_our_port      <= is_our_port && (spi_rx == UDP_PORT[7:0]);
                                 default:
@@ -574,7 +590,7 @@ module net_stack #(
                         end else if (is_ip && rxpos == 6'd23 && spi_rx != 8'h11) begin
                             cs_n  <= 1'b1;
                             state <= S_CLEANUP0;
-                        end else if (is_ip && rxpos == 6'd33 && {target_ip[31:8], spi_rx} != OUR_IP) begin
+                        end else if (is_ip && rxpos == 6'd33 && !dest_accept({target_ip[31:8], spi_rx})) begin
                             cs_n  <= 1'b1;
                             state <= S_CLEANUP0;
                         end else if (is_ip && rxpos == 6'd37 && !(is_our_port && spi_rx == UDP_PORT[7:0])) begin
