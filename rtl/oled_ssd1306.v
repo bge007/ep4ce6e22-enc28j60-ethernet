@@ -172,6 +172,7 @@ module oled_ssd1306 #(
     reg        turn_on;      // this init pass sends 0xAF rather than the table
     reg        clear_pass;   // paint blanks, not text
     reg        reinit_pending;  // one-shot cold-boot re-init, see REINIT_TICKS
+    reg        reinit_repaint;  // after that re-init, repaint text (not just clear)
     reg [26:0] life_cnt;        // cycles since reset, saturating at REINIT_TICKS
 
     localparam [7:0] LOWER_COL = 8'h00;   // SSD1306: no RAM offset
@@ -203,6 +204,7 @@ module oled_ssd1306 #(
             turn_on    <= 1'b0;
             clear_pass <= 1'b1;
             reinit_pending <= 1'b1;
+            reinit_repaint <= 1'b0;
             life_cnt       <= 27'd0;
             reset_walk;
         end else begin
@@ -250,8 +252,24 @@ module oled_ssd1306 #(
                 S_AFTER_I:
                     if (!i2c_busy && !c_stop) begin
                         if (turn_on) begin
-                            ready <= 1'b1;
-                            st    <= S_IDLE;
+                            // Display-on has just been sent. On the normal
+                            // boot path the caller repaints on its next
+                            // change, so idling here is fine. After a
+                            // re-init it is NOT: the clear pass just blanked
+                            // the panel, and eth_top only issues a refresh
+                            // when something changes -- so nothing would ever
+                            // repaint and the display would sit blank. (That
+                            // is exactly what happened on hardware: text for
+                            // ~1 s, then the re-init blanked it for good.)
+                            // textbuf still holds the text, so paint it back.
+                            if (reinit_repaint) begin
+                                reinit_repaint <= 1'b0;
+                                reset_walk;
+                                st <= S_P_START;   // clear_pass is 0 -> paints text
+                            end else begin
+                                ready <= 1'b1;
+                                st    <= S_IDLE;
+                            end
                         end else begin
                             reset_walk;
                             st <= S_P_START;
@@ -268,6 +286,7 @@ module oled_ssd1306 #(
                         // Cold-boot safety net: redo init -> clear -> display-on
                         // once, now that the panel has certainly settled.
                         reinit_pending <= 1'b0;
+                        reinit_repaint <= 1'b1;
                         init_i         <= 5'd0;
                         turn_on        <= 1'b0;
                         clear_pass     <= 1'b1;
