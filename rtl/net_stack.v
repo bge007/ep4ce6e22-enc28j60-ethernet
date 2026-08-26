@@ -119,6 +119,8 @@ module net_stack #(
     localparam [4:0] A_EIR     = 5'h1C, A_ESTAT = 5'h1D;   // common -- diagnostic only
     localparam [4:0] A_ERDPTL  = 5'h00, A_ERDPTH = 5'h01;  // bank 0
     localparam [4:0] A_EWRPTL  = 5'h02, A_EWRPTH = 5'h03;
+    localparam [4:0] A_ERXSTL  = 5'h08, A_ERXSTH = 5'h09;
+    localparam [4:0] A_ERXNDL  = 5'h0A, A_ERXNDH = 5'h0B;
     localparam [4:0] A_ETXSTL  = 5'h04, A_ETXSTH = 5'h05;
     localparam [4:0] A_ETXNDL  = 5'h06, A_ETXNDH = 5'h07;
     localparam [4:0] A_ERXRDPTL= 5'h0C, A_ERXRDPTH= 5'h0D;
@@ -277,7 +279,14 @@ module net_stack #(
                // unlike the MAC-type register reads this project abandoned.
                S_TSV_RDPT0  = 7'd60, S_TSV_RDPT1  = 7'd61,
                S_TSV_OP     = 7'd62, S_TSV_OPWAIT = 7'd63,
-               S_TSV_GO     = 7'd64, S_TSV_WT     = 7'd65;
+               S_TSV_GO     = 7'd64, S_TSV_WT     = 7'd65,
+               // Hard receive-logic resync: pulse ECON1.RXRST and rebuild the
+               // RX FIFO bounds from scratch. Reached only when the packet
+               // chain is provably corrupt (see next_ptr_ok).
+               S_RXRST0     = 7'd66, S_RXRST1     = 7'd67,
+               S_RXR_ST0    = 7'd68, S_RXR_ST1    = 7'd69,
+               S_RXR_ND0    = 7'd70, S_RXR_ND1    = 7'd71,
+               S_RXR_RD0    = 7'd72, S_RXR_RD1    = 7'd73;
 
     reg [6:0]  state, ret_state;    // ret_state: where the generic WCR/RCR returns to
     reg [4:0]  wcr_addr;
@@ -935,8 +944,63 @@ module net_stack #(
                     if (!next_ptr_ok) rx_resyncs <= rx_resyncs + 16'd1;
                     frames_seen <= frames_seen + 16'd1;
                     wcr_addr    <= A_ECON2; wcr_data <= 8'hC0;   // AUTOINC + PKTDEC
-                    ret_state   <= S_INIT1;
+                    // A corrupt chain needs the receive logic genuinely reset,
+                    // not just our own pointer moved: the hardware's write
+                    // pointer is wherever it is, so assuming the next packet
+                    // sits at ERXST simply re-reads stale bytes forever. That
+                    // was the observed failure -- rx_resyncs climbing steadily
+                    // while last_etype alternated 0600/0303 on a loop.
+                    ret_state   <= next_ptr_ok ? S_INIT1 : S_RXRST0;
                     state       <= S_WCR_OP;
+                end
+
+                // ---- hard receive-logic resync ----
+                // ECON1.RXRST (bit 6) resets the receive logic; RXEN is held
+                // clear throughout, which is also the condition the datasheet
+                // requires before ERXST/ERXND may be modified ("The pointers
+                // must not be modified while the receive logic is enabled").
+                // ERXRDPT goes back to ERXND (0x19FF -- odd, satisfying the
+                // errata), handing the whole FIFO back to the hardware.
+                // S_INIT1 re-enables RXEN and returns to polling.
+                S_RXRST0: begin
+                    wcr_addr  <= A_ECON1; wcr_data <= 8'h40;   // RXRST=1, RXEN=0
+                    ret_state <= S_RXRST1;
+                    state     <= S_WCR_OP;
+                end
+                S_RXRST1: begin
+                    wcr_addr  <= A_ECON1; wcr_data <= 8'h00;   // RXRST=0, RXEN still 0
+                    ret_state <= S_RXR_ST0;
+                    state     <= S_WCR_OP;
+                end
+                S_RXR_ST0: begin
+                    wcr_addr  <= A_ERXSTL; wcr_data <= ERXST[7:0];
+                    ret_state <= S_RXR_ST1;
+                    state     <= S_WCR_OP;
+                end
+                S_RXR_ST1: begin
+                    wcr_addr  <= A_ERXSTH; wcr_data <= ERXST[15:8];
+                    ret_state <= S_RXR_ND0;
+                    state     <= S_WCR_OP;
+                end
+                S_RXR_ND0: begin
+                    wcr_addr  <= A_ERXNDL; wcr_data <= ERXND[7:0];
+                    ret_state <= S_RXR_ND1;
+                    state     <= S_WCR_OP;
+                end
+                S_RXR_ND1: begin
+                    wcr_addr  <= A_ERXNDH; wcr_data <= ERXND[15:8];
+                    ret_state <= S_RXR_RD0;
+                    state     <= S_WCR_OP;
+                end
+                S_RXR_RD0: begin
+                    wcr_addr  <= A_ERXRDPTL; wcr_data <= ERXND[7:0];
+                    ret_state <= S_RXR_RD1;
+                    state     <= S_WCR_OP;
+                end
+                S_RXR_RD1: begin
+                    wcr_addr  <= A_ERXRDPTH; wcr_data <= ERXND[15:8];
+                    ret_state <= S_INIT1;      // re-enables RXEN, back to polling
+                    state     <= S_WCR_OP;
                 end
 
                 // ---- M4: send the current typed line as a UDP message ----
