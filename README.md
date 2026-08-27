@@ -73,7 +73,8 @@ are all simultaneously working.
 
 **The OLED display also works.** Each node drives a 1.3" 128×64 SSD1306 panel
 over I²C showing the board identity, the live EREVID readback, the host's IP,
-and a message line. Line 3 is the hook for milestone 4: Host A will write what
+a build identifier (`BLD xxxx`, so the running image is identifiable from the
+panel alone) and a message line. Line 3 is the hook for milestone 4: Host A will write what
 it transmits, Host B what it receives. See [docs/oled.md](docs/oled.md) —
 including the two traps, powering it at 3.3 V rather than the 5 V on the
 silkscreen and the panel's mislabelled datasheet (packaged as "SH1106", real

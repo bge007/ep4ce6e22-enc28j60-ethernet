@@ -668,13 +668,20 @@ module eth_top #(
     // peer as a UDP message) or one received from the peer (net_rx_updated).
     // See use_net_msg below.
     // ------------------------------------------------------------------
+    // Build identifier, shown on the OLED as "BLD xxxx". Bump this whenever
+    // you flash a build you need to tell apart from another one. Knowing at a
+    // glance which image is on which board is worth more than it sounds:
+    // several wrong conclusions during bring-up came from testing a node that
+    // was quietly running an older bitstream.
+    localparam [15:0] BUILD_ID = 16'h0001;
+
     localparam integer OCOLS = 21;
 
     // Static template; the runtime cells are patched in the case below.
     //
     //   line 0   HOST A 192.168.1.60
     //   line 1   EREVID 0x06 OK
-    //   line 2   KEYS 0.2.
+    //   line 2   KEYS 0.2.   BLD 0001
     //   line 3   MSG <text typed over the serial port>
     reg [7:0] tmpl [0:OCOLS*4-1];
     integer   ti;
@@ -690,6 +697,8 @@ module eth_top #(
         tmpl[26]="D"; tmpl[28]="0"; tmpl[29]="x";
         // line 2: "KEYS ...."
         tmpl[42]="K"; tmpl[43]="E"; tmpl[44]="Y"; tmpl[45]="S";
+        // line 2, right half: "BLD xxxx" (cols 52-59; 60-62 stay blank)
+        tmpl[52]="B"; tmpl[53]="L"; tmpl[54]="D";
         // line 3 is the received text, all 21 cells of it -- no prefix, so a
         // full-length serial message fits without being truncated.
     end
@@ -796,6 +805,12 @@ module eth_top #(
                     7'd48: w_char <= keys[1] ? "1" : ".";
                     7'd49: w_char <= keys[2] ? "2" : ".";
                     7'd50: w_char <= keys[3] ? "3" : ".";
+                    // line 2: build identifier, so the running image is
+                    // identifiable from the panel alone
+                    7'd56: w_char <= hexdig(BUILD_ID[15:12]);
+                    7'd57: w_char <= hexdig(BUILD_ID[11:8]);
+                    7'd58: w_char <= hexdig(BUILD_ID[7:4]);
+                    7'd59: w_char <= hexdig(BUILD_ID[3:0]);
                     // line 3: the text typed locally, or received from the
                     // peer (M4) -- whichever happened more recently
                     default:
