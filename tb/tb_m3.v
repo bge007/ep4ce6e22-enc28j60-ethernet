@@ -313,6 +313,29 @@ module tb_m3;
               "arp_replies_sent changed on a request for a different IP");
         check(model.pktcnt == 8'd0, "EPKTCNT not decremented for the second frame");
 
+        // ------------------------------------------------------------------
+        // Scenario 3: a next-packet pointer that poisons the SPI helpers.
+        // ------------------------------------------------------------------
+        // The two-byte helpers used to work out "have I sent the opcode yet?"
+        // by comparing the byte just shifted out against the opcode itself.
+        // That breaks whenever the DATA byte equals the OPCODE byte: the test
+        // stays true, the helper resends the data forever, and the whole FSM
+        // wedges with the packet still pending.
+        //
+        // WCR(ERXRDPTL) is 0x4C, and ERXRDPT is written as next_ptr - 1. A
+        // next pointer of 0x004D therefore writes 0x4C into opcode 0x4C and
+        // hangs the pre-fix design. On hardware the ring pointer walks all
+        // 256 low-byte values, so this hit roughly every 128 frames -- nodes
+        // wedged after 122, 156 and 134 frames.
+        //
+        // There is no assertion here on purpose: if the FSM wedges,
+        // frames_seen never reaches 3 and the testbench times out.
+        inject_arp_request(OUR_IP, 16'h004D, dut.next_rdpt);
+        wait (frames_seen == 16'd3);
+        #10_000;
+        check(arp_replies_sent == 16'd2,
+              "no ARP reply for the poisoned-pointer frame (SPI helper wedged?)");
+
         // RXEN must have survived every bank select, TX sequence and
         // cleanup above. It did not before ECON1 moved to BFS/BFC:
         // each whole-byte bank select switched the receiver off.
@@ -320,7 +343,7 @@ module tb_m3;
               "RXEN was cleared outside an RXRST pulse (bank select clobbered ECON1)");
 
         if (errors == 0)
-            $display("PASS: ARP reply byte-correct, ERXRDPT/EPKTCNT/ETXND/TXRTS all correct, RXEN never dropped, non-matching IP correctly ignored");
+            $display("PASS: ARP reply byte-correct, ERXRDPT/EPKTCNT/ETXND/TXRTS all correct, RXEN never dropped, non-matching IP ignored, poisoned next-pointer survived");
         else
             $display("%0d ERROR(S)", errors);
         $finish;

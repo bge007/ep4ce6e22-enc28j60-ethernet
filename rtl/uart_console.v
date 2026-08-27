@@ -69,6 +69,8 @@ module uart_console #(
     input  wire [15:0] net_arpreqs,  // frames parsed as an ARP request
     input  wire [15:0] net_etype,    // EtherType of the last frame walked
     input  wire [15:0] net_resyncs,  // RX pointer-chain rebuilds
+    input  wire [15:0] net_polls,    // EPKTCNT polls completed (liveness)
+    input  wire [7:0]  net_pktcnt,   // EPKTCNT value the last poll read
     input  wire [15:0] net_tsvcount, // transmit status vector: byte count
     input  wire [15:0] net_tsvwire,  //   "  bytes actually put on the wire
     input  wire [7:0]  net_tsvs2,    //   "  done/CRC/length/collision-count
@@ -127,7 +129,7 @@ module uart_console #(
     localparam integer OLED_RDY_N = 12;   // "OLED READY\r\n"
     localparam integer OLED_ERR_N = 15;   // "OLED I2C NACK\r\n"
     localparam integer ETH_N      = 11;   // "ETH C1=xx\r\n"
-    localparam integer NET_N      = 51;   // "NET F=xxxx R=xxxx E=xx S=xx A=xxxx T=xxxx\r\n"
+    localparam integer NET_N      = 62;   // "NET F=... R=... E=.. S=.. A=... T=... X=... P=xxxx K=xx\r\n"
 
     localparam integer TSV_N      = 31;   // TSV n=xxxx w=xxxx s2=xx s3=xx + CRLF
 
@@ -163,6 +165,14 @@ module uart_console #(
     reg       req_banner, req_keys, req_echo, req_oled_rdy, req_oled_err, req_eth, req_net;
     reg       oled_ready_d, oled_nack_d, eth_ready_d;   // for edge detection
     reg [15:0] net_frames_d, net_replies_d, net_arpreqs_d, net_tsvwire_d;
+
+    // Heartbeat, kept local to this module on purpose. Printing only on
+    // change makes a wedged node look identical to an idle one -- both just
+    // stop emitting. With this the console keeps talking regardless, and the
+    // P= field says which it is: still counting, or genuinely stuck.
+    // 2^24 cycles at 50 MHz is ~0.34 s.
+    reg [23:0] hb_cnt = 24'd0;
+    always @(posedge clk) hb_cnt <= hb_cnt + 24'd1;
     reg        req_tsv;
 
     wire [5:0] cur_len = (cur == T_BANNER)   ? BANNER_N[5:0]   :
@@ -249,7 +259,19 @@ module uart_console #(
             6'd45: net_byte = hexdig(net_resyncs[11:8]);
             6'd46: net_byte = hexdig(net_resyncs[7:4]);
             6'd47: net_byte = hexdig(net_resyncs[3:0]);
-            6'd48: net_byte = 8'h0D;
+            6'd48: net_byte = " ";
+            6'd49: net_byte = "P";
+            6'd50: net_byte = "=";
+            6'd51: net_byte = hexdig(net_polls[15:12]);
+            6'd52: net_byte = hexdig(net_polls[11:8]);
+            6'd53: net_byte = hexdig(net_polls[7:4]);
+            6'd54: net_byte = hexdig(net_polls[3:0]);
+            6'd55: net_byte = " ";
+            6'd56: net_byte = "K";
+            6'd57: net_byte = "=";
+            6'd58: net_byte = hexdig(net_pktcnt[7:4]);
+            6'd59: net_byte = hexdig(net_pktcnt[3:0]);
+            6'd60: net_byte = 8'h0D;
             default: net_byte = 8'h0A;
         endcase
     end
@@ -408,6 +430,7 @@ module uart_console #(
             if (net_frames != net_frames_d || net_replies != net_replies_d
                 || net_arpreqs != net_arpreqs_d)
                 req_net <= 1'b1;
+            if (hb_cnt == 24'd0) req_net <= 1'b1;
 
             // ---- transmit -----------------------------------------------
             if (cur == T_NONE) begin

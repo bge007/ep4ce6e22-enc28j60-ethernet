@@ -50,7 +50,11 @@ function Open-Port([string]$name) {
 function Last-Net([System.Text.StringBuilder]$sb) {
     # @() forces an array: a single match would otherwise stay a bare string,
     # and $l[-1] would index its last CHARACTER instead of the line.
-    $l = @(($sb.ToString() -split "`r`n") | Where-Object { $_ -match '^NET ' })
+    # Split on any run of CR/LF and match anywhere in the line: a stray
+    # newline in the stream used to leave a leading "
+" on each line, so
+    # '^NET ' silently matched nothing and every node looked wedged.
+    $l = @(($sb.ToString() -split "[`r`n]+") | Where-Object { $_ -match 'NET F=' })
     # Silence is meaningful, not missing data: the console only emits a NET
     # line when a counter CHANGES, so no line in the sample window means the
     # counters are frozen -- i.e. the node is wedged and processing nothing.

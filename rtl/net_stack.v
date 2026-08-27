@@ -91,6 +91,14 @@ module net_stack #(
     // tell us. tsv_stat2/3 carry Transmit Done, CRC/length errors, collision
     // count, defer, giant and underrun.
     output reg  [15:0]  rx_resyncs,   // times the RX pointer chain was rebuilt
+    // Liveness diagnostics. "Counters frozen" on the console is ambiguous:
+    // it means the FSM is stuck OR the part is reporting no packets, and
+    // those need completely different fixes. polls increments once per
+    // EPKTCNT poll, so it separates the two -- if it advances the FSM is
+    // alive and the part simply has nothing to hand over. last_pktcnt is
+    // whatever that poll actually read back.
+    output reg  [15:0]  polls,
+    output reg  [7:0]   last_pktcnt,
     output reg  [15:0]  tsv_count,
     output reg  [15:0]  tsv_wire,
     output reg  [7:0]   tsv_stat2,
@@ -305,6 +313,18 @@ module net_stack #(
     reg [6:0]  state, ret_state;    // ret_state: where the generic WCR/RCR returns to
     reg [4:0]  wcr_addr;
     reg [7:0]  wcr_data;
+    // Explicit phase for every two-byte SPI helper below. These used to
+    // infer "have I sent the opcode yet?" by comparing the byte just shifted
+    // out against the opcode itself -- which silently breaks whenever the
+    // DATA byte happens to equal the OPCODE byte: the comparison stays true,
+    // the helper resends the data forever and the whole FSM wedges.
+    //
+    // That is not hypothetical. WCR(ERDPTL) is 0x40 and WCR(ERXRDPTL) is
+    // 0x4C, and both are written with the low byte of an RX ring pointer,
+    // which walks through all 256 values as packets march up the buffer. Two
+    // chances in 256 per frame; nodes wedged after 122, 156 and 134 frames
+    // against a predicted mean of 128.
+    reg        op_ph2;              // 0 = opcode sent next, 1 = data byte next
     reg [4:0]  bf_addr;             // generic BFS/BFC target
     reg [7:0]  bf_mask;
     reg        bf_set;              // 1 = BFS (set bits), 0 = BFC (clear bits)
@@ -475,6 +495,9 @@ module net_stack #(
             state            <= S_INIT0;
             cs_n             <= 1'b1;
             next_rdpt        <= ERXST;
+            op_ph2           <= 1'b0;
+            polls            <= 16'd0;
+            last_pktcnt      <= 8'd0;
             wait_cnt         <= 0;
             frames_seen      <= 16'd0;
             arp_replies_sent <= 16'd0;
@@ -508,18 +531,22 @@ module net_stack #(
                     cs_n      <= 1'b0;
                     spi_tx    <= RCR(A_EPKTCNT);
                     spi_start <= 1'b1;
+                    op_ph2    <= 1'b0;
                     state     <= S_POLL_WAIT;
                 end
                 S_POLL_WAIT:
                     if (spi_done) begin
-                        if (spi_tx == RCR(A_EPKTCNT)) begin
+                        if (!op_ph2) begin
+                            op_ph2 <= 1'b1;
                             spi_tx <= 8'h00; spi_start <= 1'b1;   // clock in count
                         end else begin
                             cs_n  <= 1'b1;
                             state <= S_POLL_CHECK;
                         end
                     end
-                S_POLL_CHECK:
+                S_POLL_CHECK: begin
+                    polls       <= polls + 16'd1;
+                    last_pktcnt <= spi_rx;
                     if (spi_rx == 8'h00) begin
                         wait_cnt <= 0;
                         // Nothing waiting to receive -- if a typed line is
@@ -529,6 +556,7 @@ module net_stack #(
                     end else begin
                         state <= S_SETRDPT0;
                     end
+                end
 
                 // ---- point ERDPT at this packet's header ----
                 // These bank-0 selects write 0x00, which also clears RXEN
@@ -1162,11 +1190,13 @@ module net_stack #(
                     cs_n      <= 1'b0;
                     spi_tx    <= WCR(wcr_addr);
                     spi_start <= 1'b1;
+                    op_ph2    <= 1'b0;
                     state     <= S_WCR_DATA;
                 end
                 S_WCR_DATA:
                     if (spi_done) begin
-                        if (spi_tx == WCR(wcr_addr)) begin
+                        if (!op_ph2) begin
+                            op_ph2 <= 1'b1;
                             spi_tx <= wcr_data; spi_start <= 1'b1;
                         end else begin
                             cs_n  <= 1'b1;
@@ -1179,14 +1209,13 @@ module net_stack #(
                     cs_n      <= 1'b0;
                     spi_tx    <= bf_set ? BFS(bf_addr) : BFC(bf_addr);
                     spi_start <= 1'b1;
+                    op_ph2    <= 1'b0;
                     state     <= S_BF_DATA;
                 end
                 S_BF_DATA:
                     if (spi_done) begin
-                        // Same phase test the WCR path uses: for every
-                        // opcode/mask pairing this design issues the two
-                        // bytes differ, so equality still means "phase 1".
-                        if (spi_tx == (bf_set ? BFS(bf_addr) : BFC(bf_addr))) begin
+                        if (!op_ph2) begin
+                            op_ph2 <= 1'b1;
                             spi_tx <= bf_mask; spi_start <= 1'b1;
                         end else begin
                             cs_n  <= 1'b1;
@@ -1218,11 +1247,13 @@ module net_stack #(
                     cs_n      <= 1'b0;
                     spi_tx    <= RCR(rcr_addr);
                     spi_start <= 1'b1;
+                    op_ph2    <= 1'b0;
                     state     <= S_RCR_WAIT;
                 end
                 S_RCR_WAIT:
                     if (spi_done) begin
-                        if (spi_tx == RCR(rcr_addr)) begin
+                        if (!op_ph2) begin
+                            op_ph2 <= 1'b1;
                             spi_tx <= 8'h00; spi_start <= 1'b1;   // clock in the byte
                         end else begin
                             cs_n   <= 1'b1;
