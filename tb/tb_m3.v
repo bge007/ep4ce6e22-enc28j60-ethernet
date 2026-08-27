@@ -54,6 +54,16 @@ module enc28j60_buf_model (
     end
 
     wire [1:0] cur_bank = econ1[1:0];
+
+    // Once RXEN has been turned on, it must stay on except while RXRST is
+    // being pulsed (the datasheet requires RXEN clear to move ERXST/ERXND).
+    // Bank selects silently clearing it is the hardware bug this guards.
+    reg rxen_was_on = 1'b0;
+    reg rxen_dropped = 1'b0;
+    always @(econ1) begin
+        if (econ1[2]) rxen_was_on = 1'b1;
+        else if (rxen_was_on && !econ1[6]) rxen_dropped = 1'b1;
+    end
     localparam [7:0] OP_RBM = 8'h3A, OP_WBM = 8'h7A;
 
     // Observation flags for the testbench.
@@ -90,6 +100,13 @@ module enc28j60_buf_model (
                         if (byte_idx == 1) cur_ptr = {regs[0][3], regs[0][2]}; // EWRPTH:EWRPTL
                         buf_mem[cur_ptr] = shift_in;
                         cur_ptr = cur_ptr + 16'd1;
+                    end else if (opcode[7:5] == 3'b100 && opcode[4:0] == 5'h1F) begin
+                        // BFS ECON1: OR the mask in, touching nothing else.
+                        econ1 = econ1 | shift_in;
+                        if (shift_in[3]) txrts_seen = 1'b1;      // TXRTS bit
+                    end else if (opcode[7:5] == 3'b101 && opcode[4:0] == 5'h1F) begin
+                        // BFC ECON1: AND the inverted mask in.
+                        econ1 = econ1 & ~shift_in;
                     end else if (opcode[7:5] == 3'b010) begin   // WCR
                         if (opcode[4:0] == 5'h1F) begin
                             econ1 = shift_in;
@@ -296,8 +313,14 @@ module tb_m3;
               "arp_replies_sent changed on a request for a different IP");
         check(model.pktcnt == 8'd0, "EPKTCNT not decremented for the second frame");
 
+        // RXEN must have survived every bank select, TX sequence and
+        // cleanup above. It did not before ECON1 moved to BFS/BFC:
+        // each whole-byte bank select switched the receiver off.
+        check(!model.rxen_dropped,
+              "RXEN was cleared outside an RXRST pulse (bank select clobbered ECON1)");
+
         if (errors == 0)
-            $display("PASS: ARP reply byte-correct, ERXRDPT/EPKTCNT/ETXND/TXRTS all correct, non-matching IP correctly ignored");
+            $display("PASS: ARP reply byte-correct, ERXRDPT/EPKTCNT/ETXND/TXRTS all correct, RXEN never dropped, non-matching IP correctly ignored");
         else
             $display("%0d ERROR(S)", errors);
         $finish;

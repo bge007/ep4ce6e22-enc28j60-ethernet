@@ -112,6 +112,15 @@ module net_stack #(
     // ------------------------------------------------------------------
     function [7:0] WCR(input [4:0] a); WCR = {3'b010, a}; endfunction
     function [7:0] RCR(input [4:0] a); RCR = {3'b000, a}; endfunction
+    // Bit Field Set / Clear. Same two-byte shape as WCR (opcode, then a
+    // mask), but the part ORs / AND-NOTs the mask into the register instead
+    // of overwriting it. Legal on ETH registers only -- which ECON1 is.
+    // Every ECON1 access below goes through these now, because a whole-byte
+    // WCR to ECON1 cannot avoid rewriting RXEN and TXRTS as a side effect of
+    // selecting a bank: the bank selects were switching the receiver off,
+    // which is what left both nodes with frozen counters after a while.
+    function [7:0] BFS(input [4:0] a); BFS = {3'b100, a}; endfunction
+    function [7:0] BFC(input [4:0] a); BFC = {3'b101, a}; endfunction
     localparam [7:0] OP_RBM = 8'h3A;     // fixed opcode, no address field
     localparam [7:0] OP_WBM = 8'h7A;
 
@@ -286,11 +295,21 @@ module net_stack #(
                S_RXRST0     = 7'd66, S_RXRST1     = 7'd67,
                S_RXR_ST0    = 7'd68, S_RXR_ST1    = 7'd69,
                S_RXR_ND0    = 7'd70, S_RXR_ND1    = 7'd71,
-               S_RXR_RD0    = 7'd72, S_RXR_RD1    = 7'd73;
+               S_RXR_RD0    = 7'd72, S_RXR_RD1    = 7'd73,
+               // Generic 1-shot BFS/BFC, and the two-step bank select built
+               // on top of it (clear BSEL, then set the wanted bits).
+               S_BF_OP      = 7'd74, S_BF_DATA    = 7'd75,
+               S_BSEL0      = 7'd76, S_BSEL1      = 7'd77,
+               S_RXRSTA     = 7'd78;
 
     reg [6:0]  state, ret_state;    // ret_state: where the generic WCR/RCR returns to
     reg [4:0]  wcr_addr;
     reg [7:0]  wcr_data;
+    reg [4:0]  bf_addr;             // generic BFS/BFC target
+    reg [7:0]  bf_mask;
+    reg        bf_set;              // 1 = BFS (set bits), 0 = BFC (clear bits)
+    reg [6:0]  bf_ret;              // where the generic BF op returns to
+    reg [7:0]  ec1_set;             // bits to set after a bank select
     reg [4:0]  rcr_addr;
     reg [7:0]  rcr_rb;              // generic RCR's captured byte
     reg [26:0] wait_cnt;
@@ -480,9 +499,9 @@ module net_stack #(
                     state      <= S_WCR_OP;
                 end
                 S_INIT1: begin
-                    wcr_addr  <= A_ECON1; wcr_data <= 8'h05;    // bank1, RXEN=1
+                    ec1_set   <= 8'h05;                         // bank1, RXEN=1
                     ret_state <= S_POLL;
-                    state     <= S_WCR_OP;
+                    state     <= S_BSEL0;
                 end
                 // ---- poll EPKTCNT ----
                 S_POLL: begin
@@ -522,9 +541,9 @@ module net_stack #(
                 // during the pointer updates is evidently what this part wants,
                 // so do not "fix" this again without hardware evidence.
                 S_SETRDPT0: begin
-                    wcr_addr  <= A_ECON1; wcr_data <= 8'h00;    // bank 0
+                    ec1_set   <= 8'h00;                         // bank 0; RXEN untouched
                     ret_state <= S_SETRDPT1;
-                    state     <= S_WCR_OP;
+                    state     <= S_BSEL0;
                 end
                 S_SETRDPT1: begin
                     wcr_addr  <= A_ERDPTL; wcr_data <= next_rdpt[7:0];
@@ -708,9 +727,9 @@ module net_stack #(
                 // board's MAC address -- i.e. not one valid frame ever
                 // reached the wire.
                 S_TX_BANK: begin
-                    wcr_addr  <= A_ECON1; wcr_data <= 8'h00;    // bank 0
+                    ec1_set   <= 8'h00;                         // bank 0; RXEN untouched
                     ret_state <= S_TXRST0;
-                    state     <= S_WCR_OP;
+                    state     <= S_BSEL0;
                 end
                 S_SETWRPT0: begin
                     wcr_addr  <= A_EWRPTL; wcr_data <= ETXST[7:0];
@@ -797,14 +816,14 @@ module net_stack #(
                 // in that window. (A real driver would use the bit-set/bit-clear
                 // opcodes to touch only TXRST; this design only implements WCR.)
                 S_TXRST0: begin
-                    wcr_addr  <= A_ECON1; wcr_data <= 8'h84;   // TXRST=1, RXEN=1
-                    ret_state <= S_TXRST1;
-                    state     <= S_WCR_OP;
+                    bf_addr <= A_ECON1; bf_mask <= 8'h80; bf_set <= 1'b1;  // TXRST=1 only
+                    bf_ret  <= S_TXRST1;
+                    state   <= S_BF_OP;
                 end
                 S_TXRST1: begin
-                    wcr_addr  <= A_ECON1; wcr_data <= 8'h04;   // TXRST=0, RXEN=1
-                    ret_state <= S_SETTXST0;
-                    state     <= S_WCR_OP;
+                    bf_addr <= A_ECON1; bf_mask <= 8'h80; bf_set <= 1'b0;  // TXRST=0 only
+                    bf_ret  <= S_SETTXST0;
+                    state   <= S_BF_OP;
                 end
 
                 // Re-arm ETXST after every TXRST pulse. ETXST is written once
@@ -829,10 +848,9 @@ module net_stack #(
                 end
 
                 S_TXRTS: begin
-                    // bank 0, RXEN=1, TXRTS=1
-                    wcr_addr  <= A_ECON1; wcr_data <= 8'h0C;
-                    ret_state <= S_TXWAIT;
-                    state     <= S_WCR_OP;
+                    bf_addr <= A_ECON1; bf_mask <= 8'h08; bf_set <= 1'b1;  // TXRTS=1 only
+                    bf_ret  <= S_TXWAIT;
+                    state   <= S_BF_OP;
                 end
                 S_TXWAIT:
                     // Fixed conservative delay rather than polling TXRTS --
@@ -918,9 +936,9 @@ module net_stack #(
                 // own extra state for no real benefit -- rcr_rb simply holds
                 // stale data on those frames instead of a fresh ESTAT value.
                 S_CLEANUP1: begin
-                    wcr_addr   <= A_ECON1; wcr_data <= 8'h00;    // bank 0
+                    ec1_set    <= 8'h00;                         // bank 0; RXEN untouched
                     ret_state  <= S_CLEANUP2;
-                    state      <= S_WCR_OP;
+                    state      <= S_BSEL0;
                 end
                 S_CLEANUP2: begin
                     wcr_addr  <= A_ERXRDPTL; wcr_data <= next_erxrdpt[7:0];
@@ -950,7 +968,7 @@ module net_stack #(
                     // sits at ERXST simply re-reads stale bytes forever. That
                     // was the observed failure -- rx_resyncs climbing steadily
                     // while last_etype alternated 0600/0303 on a loop.
-                    ret_state   <= next_ptr_ok ? S_INIT1 : S_RXRST0;
+                    ret_state   <= next_ptr_ok ? S_INIT1 : S_RXRSTA;
                     state       <= S_WCR_OP;
                 end
 
@@ -962,15 +980,20 @@ module net_stack #(
                 // ERXRDPT goes back to ERXND (0x19FF -- odd, satisfying the
                 // errata), handing the whole FIFO back to the hardware.
                 // S_INIT1 re-enables RXEN and returns to polling.
+                S_RXRSTA: begin
+                    bf_addr <= A_ECON1; bf_mask <= 8'h04; bf_set <= 1'b0;  // RXEN=0
+                    bf_ret  <= S_RXRST0;
+                    state   <= S_BF_OP;
+                end
                 S_RXRST0: begin
-                    wcr_addr  <= A_ECON1; wcr_data <= 8'h40;   // RXRST=1, RXEN=0
-                    ret_state <= S_RXRST1;
-                    state     <= S_WCR_OP;
+                    bf_addr <= A_ECON1; bf_mask <= 8'h40; bf_set <= 1'b1;  // RXRST=1
+                    bf_ret  <= S_RXRST1;
+                    state   <= S_BF_OP;
                 end
                 S_RXRST1: begin
-                    wcr_addr  <= A_ECON1; wcr_data <= 8'h00;   // RXRST=0, RXEN still 0
-                    ret_state <= S_RXR_ST0;
-                    state     <= S_WCR_OP;
+                    bf_addr <= A_ECON1; bf_mask <= 8'h40; bf_set <= 1'b0;  // RXRST=0
+                    bf_ret  <= S_RXR_ST0;
+                    state   <= S_BF_OP;
                 end
                 S_RXR_ST0: begin
                     wcr_addr  <= A_ERXSTL; wcr_data <= ERXST[7:0];
@@ -1011,19 +1034,19 @@ module net_stack #(
                 // Same ordering rule as the ARP path above: TXRST pulse FIRST,
                 // then load EWRPT, then write the frame, then ETXND, then TXRTS.
                 S_MSGBANK: begin
-                    wcr_addr  <= A_ECON1; wcr_data <= 8'h00;    // bank 0
+                    ec1_set   <= 8'h00;                         // bank 0; RXEN untouched
                     ret_state <= S_MSGTXRST0;
-                    state     <= S_WCR_OP;
+                    state     <= S_BSEL0;
                 end
                 S_MSGTXRST0: begin
-                    wcr_addr  <= A_ECON1; wcr_data <= 8'h84;    // TXRST=1, RXEN=1
-                    ret_state <= S_MSGTXRST1;
-                    state     <= S_WCR_OP;
+                    bf_addr <= A_ECON1; bf_mask <= 8'h80; bf_set <= 1'b1;  // TXRST=1 only
+                    bf_ret  <= S_MSGTXRST1;
+                    state   <= S_BF_OP;
                 end
                 S_MSGTXRST1: begin
-                    wcr_addr  <= A_ECON1; wcr_data <= 8'h04;    // TXRST=0, RXEN=1
-                    ret_state <= S_MSGTXST0;
-                    state     <= S_WCR_OP;
+                    bf_addr <= A_ECON1; bf_mask <= 8'h80; bf_set <= 1'b0;  // TXRST=0 only
+                    bf_ret  <= S_MSGTXST0;
+                    state   <= S_BF_OP;
                 end
                 // Re-arm ETXST, same reason as S_SETTXST0 on the ARP path.
                 S_MSGTXST0: begin
@@ -1115,9 +1138,9 @@ module net_stack #(
                     state     <= S_WCR_OP;
                 end
                 S_MSGTXRTS: begin
-                    wcr_addr  <= A_ECON1; wcr_data <= 8'h0C;    // RXEN=1, TXRTS=1
-                    ret_state <= S_MSGTXWAIT;
-                    state     <= S_WCR_OP;
+                    bf_addr <= A_ECON1; bf_mask <= 8'h08; bf_set <= 1'b1;  // TXRTS=1 only
+                    bf_ret  <= S_MSGTXWAIT;
+                    state   <= S_BF_OP;
                 end
                 S_MSGTXWAIT:
                     if (wait_cnt == 27'd25_000) begin
@@ -1149,6 +1172,44 @@ module net_stack #(
                             cs_n  <= 1'b1;
                             state <= ret_state;
                         end
+                    end
+
+                // ---- generic single BFS/BFC ----
+                S_BF_OP: begin
+                    cs_n      <= 1'b0;
+                    spi_tx    <= bf_set ? BFS(bf_addr) : BFC(bf_addr);
+                    spi_start <= 1'b1;
+                    state     <= S_BF_DATA;
+                end
+                S_BF_DATA:
+                    if (spi_done) begin
+                        // Same phase test the WCR path uses: for every
+                        // opcode/mask pairing this design issues the two
+                        // bytes differ, so equality still means "phase 1".
+                        if (spi_tx == (bf_set ? BFS(bf_addr) : BFC(bf_addr))) begin
+                            spi_tx <= bf_mask; spi_start <= 1'b1;
+                        end else begin
+                            cs_n  <= 1'b1;
+                            state <= bf_ret;
+                        end
+                    end
+
+                // ---- bank select that leaves RXEN and TXRTS alone ----
+                // Clear BSEL[1:0], then set whatever ec1_set asks for (the
+                // bank number, plus RXEN where the caller wants it on). A
+                // caller wanting bank 0 and no other change sets ec1_set = 0,
+                // which skips the second op entirely.
+                S_BSEL0: begin
+                    bf_addr <= A_ECON1; bf_mask <= 8'h03; bf_set <= 1'b0;
+                    bf_ret  <= S_BSEL1;
+                    state   <= S_BF_OP;
+                end
+                S_BSEL1:
+                    if (ec1_set == 8'h00) state <= ret_state;
+                    else begin
+                        bf_addr <= A_ECON1; bf_mask <= ec1_set; bf_set <= 1'b1;
+                        bf_ret  <= ret_state;
+                        state   <= S_BF_OP;
                     end
 
                 // ---- generic single RCR of a common/bank-independent

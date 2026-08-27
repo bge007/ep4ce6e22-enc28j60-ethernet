@@ -10,22 +10,42 @@ payload, which is what 1,472-byte datagrams work out to once framing overhead
 is accounted for. See [docs/plan.md](docs/plan.md) for that arithmetic and the
 design rationale.
 
-> ### Status: M1–M3 confirmed on real hardware, M4–M5 not started
+> ### Status: M1–M3 confirmed on real hardware, M4 partly confirmed, M5 not started
 >
-> Host A has been flashed and tested on a real EP4CE6E22 + ENC28J60 board.
-> `EREVID` reads back `0x06` on the LEDs and OLED, the serial console and
-> button input work, M2's RX/TX buffer, MAC filter, MAC address and `RXEN`
-> are written and the `ECON1` readback (`RXEN=1`) is confirmed correct over
-> the real UART, and M3's ARP responder is implemented, simulation-verified,
-> and flashed. What's still open: the ENC28J60's own link LED hasn't been
-> visually confirmed yet, the MAC-register (`MACON1`/`MACON3`) readback
-> diagnostic was tried and dropped (two different guesses at the SPI read
-> protocol for MAC-type registers both produced wrong values on real
-> hardware, and this project has never been supplied the ENC28J60 datasheet
-> — this doesn't affect the writes themselves, only my ability to read them
-> back for confirmation), and M3's real-hardware `ping` retest (expect
-> "Destination host unreachable" → "Request timed out") hasn't been confirmed
-> yet. Host B has not been flashed or tested at all yet.
+> Both nodes have been flashed and tested on real EP4CE6E22 + ENC28J60
+> boards. `EREVID` reads back `0x06` on the LEDs and OLED, the serial console
+> and button input work, and M2's RX/TX buffer, MAC filter, MAC address and
+> `RXEN` are written with the `ECON1` readback confirmed over the real UART.
+>
+> **M3's ARP responder now answers on the wire.** `ping` moved from
+> "Destination host unreachable" to "Request timed out" — the expected M3
+> result, since ICMP echo is deferred — confirmed four ways: the Windows ARP
+> cache resolves, the Cisco 2960 learns both MAC addresses, the switch port's
+> `InUcastPkts` climbs, and the node's own console counters advance. Getting
+> there took two hardware-only bugs that no amount of simulation would have
+> surfaced; both are written up in [docs/enc28j60.md](docs/enc28j60.md):
+>
+> - **Every transmitted frame had a bad CRC.** The transmit status vector read
+>   back `s2=0x90` — Transmit Done, but with the CRC-error bit set. Switches
+>   discard bad-CRC frames silently, so the symptom was simply that nothing
+>   ever arrived. Fixed with a per-packet control byte of `0x07`, which forces
+>   pad and CRC generation per frame rather than relying on `MACON3`.
+> - **Bank selects were switching the receiver off.** `ECON1` holds the
+>   bank-select bits *and* `RXEN`, so a whole-byte `WCR` of `0x00` meaning
+>   "select bank 0" also cleared `RXEN`. Both nodes would run for a while and
+>   then stop receiving with their counters frozen. Fixed by moving every
+>   `ECON1` access to the `BFS`/`BFC` bit-field opcodes, which touch only the
+>   masked bits. `tb_m3`/`tb_m4` now assert that `RXEN` is never dropped
+>   outside an `RXRST` pulse, and that assertion fails against the old code.
+>
+> M4's receive half is confirmed on hardware: a UDP broadcast sent from a PC
+> appears on the node's OLED. Board-to-board messaging is next.
+>
+> What's still open: the ENC28J60's own link LED hasn't been visually
+> confirmed, and the MAC-register (`MACON1`/`MACON3`) readback diagnostic was
+> tried and dropped (two different guesses at the SPI read protocol for
+> MAC-type registers both produced wrong values on real hardware) — that
+> doesn't affect the writes themselves, only my ability to read them back.
 
 ---
 
@@ -49,7 +69,7 @@ are all simultaneously working.
 | Logic elements | 2,176 / 6,272 (35%) |
 | Worst-case setup slack | +7.85 ns |
 | Worst-case hold slack | +0.19 ns |
-| Hardware | M1 confirmed, M2's RXEN confirmed (`ECON1` readback), M3 flashed to Host A — `ping` retest pending |
+| Hardware | M1 confirmed, M2's RXEN confirmed (`ECON1` readback), M3 ARP answering on both nodes (`ping`: "unreachable" → "timed out") |
 
 **The OLED display also works.** Each node drives a 1.3" 128×64 SSD1306 panel
 over I²C showing the board identity, the live EREVID readback, the host's IP,
@@ -332,8 +352,8 @@ and throughput that collapses under load.
 | M1.5 | OLED — I²C master, SSD1306 driver, status text | Status text on the panel | Simulated ✓, hardware ✓ (Host A — see [docs/oled.md](docs/oled.md#troubleshooting-panel-blank-after-power-up-despite-clean-ic) for the controller-ID and reset-button gotchas) |
 | M1.6 | Console — UART, buttons, typed message to OLED | Type in PowerShell, see it on the panel | Simulated ✓, hardware ✓ (Host A, byte-perfect round trip) |
 | M2 | Link up — RX/TX buffer, MAC filter, MAC config, MAC address, RXEN | Link LED on both boards | RXEN confirmed on hardware ✓ (Host A), link LED pending |
-| M3 | Ping — ARP responder (ICMP echo deferred to M4) | `ping` moves from "unreachable" to "timed out" | Simulated ✓, flashed to Host A, hardware retest pending |
-| M4 | UDP echo + **message display** | Host A sends `Hello World`, Host B shows it | Not started |
+| M3 | Ping — ARP responder (ICMP echo deferred to M4) | `ping` moves from "unreachable" to "timed out" | Simulated ✓, hardware ✓ (both nodes; needed the TX-CRC and `ECON1`/`RXEN` fixes above) |
+| M4 | UDP echo + **message display** | Host A sends `Hello World`, Host B shows it | Simulated ✓, receive half hardware ✓ (PC broadcast → OLED); board-to-board pending |
 | M5 | Max speed — UDP blaster + measurement | ≥ 9.3 Mbit/s, loss-free | Not started |
 
 The headline demo — **`Hello World` typed on Host A appearing on Host B's

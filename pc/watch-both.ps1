@@ -48,7 +48,9 @@ function Open-Port([string]$name) {
 # Last NET line wins: it carries the running counters, so the most recent
 # sample is the current state. Older lines are just history.
 function Last-Net([System.Text.StringBuilder]$sb) {
-    $l = ($sb.ToString() -split "`r`n") | Where-Object { $_ -match '^NET ' }
+    # @() forces an array: a single match would otherwise stay a bare string,
+    # and $l[-1] would index its last CHARACTER instead of the line.
+    $l = @(($sb.ToString() -split "`r`n") | Where-Object { $_ -match '^NET ' })
     # Silence is meaningful, not missing data: the console only emits a NET
     # line when a counter CHANGES, so no line in the sample window means the
     # counters are frozen -- i.e. the node is wedged and processing nothing.
