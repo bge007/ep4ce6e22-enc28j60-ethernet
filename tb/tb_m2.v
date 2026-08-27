@@ -43,12 +43,14 @@ module enc28j60_bank_model (
     reg [7:0] opcode;
 
     reg [7:0] econ1;                    // common register, not banked
+    reg [7:0] econ2;                    // likewise; errata 19 clears PWRSV here
+    reg       got_pwrsv_clr;
     reg [7:0] regs [0:3][0:31];         // [bank][addr] -- everything else
 
     integer bi, ai;
     initial begin
         miso = 0; shift_in = 0; shift_out = 0; bit_cnt = 0; byte_idx = 0;
-        opcode = 0; econ1 = 0;
+        opcode = 0; econ1 = 0; econ2 = 0; got_pwrsv_clr = 0;
         for (bi = 0; bi < 4; bi = bi + 1)
             for (ai = 0; ai < 32; ai = ai + 1) regs[bi][ai] = 8'h00;
     end
@@ -75,6 +77,10 @@ module enc28j60_bank_model (
                             shift_out = econ1;
                         else if (shift_in[4:0] == 5'h12 && cur_bank == 2'd3)
                             shift_out = 8'h06;                 // EREVID
+                        else if (shift_in[4:0] == 5'h1D)
+                            // ESTAT: CLKRDY set, unimplemented bit 3 clear --
+                            // what errata 19 step 5 checks before configuring.
+                            shift_out = 8'h01;
                         else
                             shift_out = regs[cur_bank][shift_in[4:0]];
                     end
@@ -82,6 +88,12 @@ module enc28j60_bank_model (
                     if (opcode[7:5] == 3'b010) begin           // WCR
                         if (opcode[4:0] == 5'h1F) econ1 = shift_in;
                         else                       regs[cur_bank][opcode[4:0]] = shift_in;
+                    end
+                    // BFC ECON2: errata 19 step 1. A part left in Power Save
+                    // mode ignores the System Reset command entirely.
+                    if (opcode[7:5] == 3'b101 && opcode[4:0] == 5'h1E) begin
+                        econ2         = econ2 & ~shift_in;
+                        got_pwrsv_clr = 1'b1;
                     end
                 end
                 byte_idx = byte_idx + 1;

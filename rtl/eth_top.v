@@ -162,6 +162,9 @@ module eth_top #(
     // ENC28J60 opcodes / registers used here
     // ------------------------------------------------------------------
     localparam [7:0] OP_SRC        = 8'hFF;              // system reset
+    localparam [7:0] OP_BFC_ECON2  = {3'b101, 5'h1E};    // Bit Field Clear, ECON2
+    localparam [7:0] OP_RCR_ESTAT  = {3'b000, 5'h1D};    // read ESTAT (common)
+    localparam [7:0] M_PWRSV       = 8'h20;              // ECON2<5>
     localparam [7:0] OP_WCR_ECON1  = {3'b010, 5'h1F};    // write ECON1
     localparam [7:0] OP_RCR_EREVID = {3'b000, 5'h12};    // read  EREVID (bank 3)
     localparam [7:0] BANK3         = 8'h03;
@@ -343,6 +346,7 @@ module eth_top #(
     end
 
     // delays at 50 MHz
+    localparam [19:0] T_300US = 20'd15_000;
     localparam [19:0] T_2MS  = 20'd100_000;
     localparam [19:0] T_10MS = 20'd500_000;
     localparam [22:0] T_100MS = 23'd5_000_000;
@@ -368,10 +372,26 @@ module eth_top #(
     localparam S_M2_NEXT    = 4'd14;
     localparam S_M2_DONE    = 4'd15;
     localparam S_HANDOFF    = 5'd16;   // M1/M2 FSM done forever; net_stack owns SPI now
+    // Errata DS80349C item 19 reset sequence, for "a device in an unknown
+    // state" -- which is exactly what a JTAG reconfigure leaves behind, since
+    // the FPGA restarts while the ENC28J60 keeps whatever state it had. The
+    // critical part is clearing ECON2.PWRSV FIRST: in Power Save mode the SPI
+    // System Reset command has no effect at all, so a plain SRC can silently
+    // do nothing and every register write afterwards lands on a part that was
+    // never reset.
+    localparam S_PWRSV_OP   = 5'd17;
+    localparam S_PWRSV_DAT  = 5'd18;
+    localparam S_PWRSV_WAIT = 5'd19;   // step 2: >= 300 us for the regulator
+    localparam S_CLKRDY_OP  = 5'd20;   // step 5: confirm the reset took
+    localparam S_CLKRDY_DAT = 5'd21;
+    localparam S_CLKRDY_CHK = 5'd22;
+    localparam S_CLKRDY_WAIT= 5'd23;   // step 4: >= 1 ms for the reset to complete
 
     reg [4:0]  state;
     reg [22:0] wait_cnt;
     reg        enc_rst_q;
+    reg        m12_ph2;             // explicit SPI phase; never infer it from data
+    reg [7:0]  estat_rb;
     reg [7:0]  erevid;
     reg        spi_busy_d;
 
@@ -397,6 +417,8 @@ module eth_top #(
             wait_cnt   <= 23'd0;
             m12_cs_n       <= 1'b1;
             enc_rst_q  <= 1'b0;
+            m12_ph2    <= 1'b0;
+            estat_rb   <= 8'h00;
             erevid     <= 8'h00;
             m2_started <= 1'b0;
             m2_idx     <= 6'd0;
@@ -417,6 +439,35 @@ module eth_top #(
                 S_HW_WAIT:
                     if (wait_cnt == {3'b000, T_10MS}) begin
                         wait_cnt <= 23'd0;
+                        state    <= S_PWRSV_OP;
+                    end else
+                        wait_cnt <= wait_cnt + 1'b1;
+
+                // ---- errata 19, step 1: clear ECON2.PWRSV ----
+                S_PWRSV_OP: begin
+                    m12_cs_n      <= 1'b0;
+                    m12_spi_tx    <= OP_BFC_ECON2;
+                    m12_spi_start <= 1'b1;
+                    m12_ph2       <= 1'b0;
+                    state         <= S_PWRSV_DAT;
+                end
+                S_PWRSV_DAT:
+                    if (spi_done) begin
+                        if (!m12_ph2) begin
+                            m12_ph2       <= 1'b1;
+                            m12_spi_tx    <= M_PWRSV;
+                            m12_spi_start <= 1'b1;
+                        end else begin
+                            m12_cs_n <= 1'b1;
+                            wait_cnt <= 23'd0;
+                            state    <= S_PWRSV_WAIT;
+                        end
+                    end
+
+                // ---- step 2: let the internal regulator settle ----
+                S_PWRSV_WAIT:
+                    if (wait_cnt == {3'b000, T_300US}) begin
+                        wait_cnt <= 23'd0;
                         state    <= S_SRC;
                     end else
                         wait_cnt <= wait_cnt + 1'b1;
@@ -430,10 +481,49 @@ module eth_top #(
 
                 S_SRC_WAIT:
                     if (spi_done) begin
-                        m12_cs_n     <= 1'b1;
+                        m12_cs_n <= 1'b1;
                         wait_cnt <= 23'd0;
-                        state    <= S_BANK_OP;   // S_BANK_OP waits 10 ms first
+                        // Step 4's 1 ms is covered by S_BANK_OP's existing
+                        // 10 ms wait, but the part must be *checked* before it
+                        // is configured, so detour via the CLKRDY read.
+                        state    <= S_CLKRDY_WAIT;
                     end
+
+                // ---- step 5: confirm the reset actually took ----
+                // ESTAT.CLKRDY (bit 0) set and the unimplemented bit 3 clear.
+                // If not, the part is not ready (or never reset) -- go back to
+                // step 1 rather than configuring a device in an unknown state.
+                S_CLKRDY_WAIT:
+                    if (wait_cnt == {3'b000, T_2MS}) begin
+                        wait_cnt <= 23'd0;
+                        state    <= S_CLKRDY_OP;
+                    end else
+                        wait_cnt <= wait_cnt + 1'b1;
+
+                S_CLKRDY_OP: begin
+                    m12_cs_n      <= 1'b0;
+                    m12_spi_tx    <= OP_RCR_ESTAT;
+                    m12_spi_start <= 1'b1;
+                    m12_ph2       <= 1'b0;
+                    state         <= S_CLKRDY_DAT;
+                end
+                S_CLKRDY_DAT:
+                    if (spi_done) begin
+                        if (!m12_ph2) begin
+                            m12_ph2       <= 1'b1;
+                            m12_spi_tx    <= 8'h00;
+                            m12_spi_start <= 1'b1;
+                        end else begin
+                            m12_cs_n <= 1'b1;
+                            estat_rb <= spi_rx;
+                            state    <= S_CLKRDY_CHK;
+                        end
+                    end
+                S_CLKRDY_CHK: begin
+                    wait_cnt <= 23'd0;
+                    if (estat_rb[0] && !estat_rb[3]) state <= S_BANK_OP;
+                    else                             state <= S_PWRSV_OP;
+                end
 
                 S_BANK_OP: begin
                     // wait out the post-SRC delay before first real command
@@ -461,12 +551,16 @@ module eth_top #(
                     m12_cs_n      <= 1'b0;
                     m12_spi_tx    <= OP_RCR_EREVID;
                     m12_spi_start <= 1'b1;
+                    m12_ph2       <= 1'b0;
                     state     <= S_RD_DATA;
                 end
 
                 S_RD_DATA:
                     if (spi_done) begin
-                        if (m12_spi_tx == OP_RCR_EREVID) begin
+                        // Explicit phase, not "does the byte look like the
+                        // opcode?" -- see the op_ph2 note in net_stack.v.
+                        if (!m12_ph2) begin
+                            m12_ph2       <= 1'b1;
                             m12_spi_tx    <= 8'h00;       // clock in the data byte
                             m12_spi_start <= 1'b1;
                         end else begin
