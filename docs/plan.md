@@ -122,13 +122,102 @@ Total ~2,500 LE of 6,272 — comfortable margin, no external RAM.
 
 | | Milestone | Exit criterion | State |
 |---|---|---|---|
-| M1 | SPI alive — project, pinout, `spi_master`, EREVID readback | `0x06` on the LEDs | **Confirmed on Host A hardware** |
-| M2 | Link up — full init FSM, MAC config, RXEN | Link established | RXEN confirmed on Host A hardware; link LED not yet visually checked |
-| M3 | Ping — RX/TX engines, ARP responder (ICMP echo deferred to M4) | Sustained ping, 0% loss | Implemented, simulation-verified, flashed to Host A; hardware `ping` retest pending |
-| M4 | UDP echo — parsing, checksums, echo path | 10k datagrams echoed correctly | Not started |
+| M1 | SPI alive — project, pinout, `spi_master`, EREVID readback | `0x06` on the LEDs | **Confirmed on both nodes** |
+| M2 | Link up — full init FSM, MAC config, RXEN | Link established | RXEN confirmed on hardware (`ECON1` readback); link LED not yet visually checked |
+| M3 | Ping — RX/TX engines, ARP responder (ICMP echo deferred to M4) | Sustained ping, 0% loss | **ARP answering on hardware**; not yet *sustained* — see the stability section below |
+| M4 | UDP echo — parsing, checksums, echo path | 10k datagrams echoed correctly | Simulated; receive half confirmed on hardware (PC broadcast → OLED). Board-to-board blocked on M3 stability |
 | M5 | Max speed — UDP blaster, measurement scripts, full duplex | >= 9.3 Mbit/s, loss-free | Not started |
 
 Each milestone is a self-contained chunk; M3 is the largest.
+
+
+## Stability: where M3 actually stands
+
+M3's *functional* exit criterion is met — the ARP responder answers, `ping`
+moves from "Destination host unreachable" to "Request timed out", the switch
+learns both MACs, and the port's `InUcastPkts` climbs. The *sustained* half is
+not met: a node runs correctly for a few minutes and then stops receiving.
+
+Four separate hardware-only faults have been found and fixed, none of which
+simulation would have surfaced on its own. They are written up in full in
+[enc28j60.md](enc28j60.md); in brief:
+
+| # | Fault | Signature | Status |
+|---|---|---|---|
+| 1 | Every TX frame had a bad CRC | TSV `s2=0x90`; switch `InOctets` up, `InUcastPkts` 0 | Fixed — per-packet control byte `0x07` |
+| 2 | Bank selects cleared `ECON1.RXEN` | Ran a while, then received nothing | Fixed — all `ECON1` access via `BFS`/`BFC` |
+| 3 | Two-byte SPI helpers hung when data equalled the opcode | FSM frozen, `P=` static, `K=01` | Fixed — explicit phase bit |
+| 4 | Reflashing the FPGA does not reset the ENC28J60 | `A=0000`, `T=0000` from frame 1 | Fixed — errata-19 reset sequence |
+
+Fault 3 is worth singling out: `WCR(ERDPTL)` is `0x40` and `WCR(ERXRDPTL)` is
+`0x4C`, and both are written with the low byte of an RX ring pointer that walks
+all 256 values. Two chances in 256 per frame predicts a mean of 128 frames to
+failure; the observed wedges were at **122, 156 and 134 frames**.
+
+Each fix carries a regression test that was verified to *fail* against the
+pre-fix RTL rather than pass vacuously.
+
+### Measured results after the fixes
+
+| Run | Frames | Resyncs (`X`) | Outcome |
+|---|---|---|---|
+| Host A, 25 ping rounds | — | — | 0/25 degraded (was 25/25) |
+| Host B, 15 min | 365 | 0 → 21 late | Ran ~11 min, then chain corruption |
+| Host A, 15 min | 275 → 904 | 0 → 414 | Clean ~8.5 min, then resync storm |
+| Host A, current | 602 | **0** | Healthy, counters advancing |
+
+### The one remaining fault
+
+After a period of correct operation the RX packet-chain pointer goes out of
+range. The driver detects this (`next_ptr_ok`) and pulses `ECON1.RXRST` to
+resync — but **the resync does not restore reception**. `X` climbs into the
+hundreds, the part stops delivering packets (`EPKTCNT` reads 0 forever) and the
+node never recovers, while the FSM itself stays alive and polling.
+
+Two facts constrain the cause:
+
+- It is not the FSM. The poll counter keeps advancing throughout, so the driver
+  is healthy and the *part* has stopped handing over frames.
+- It is not purely the module. A faulty ENC28J60 was found and replaced early
+  on, which removed one source of chain corruption but not this failure.
+
+**Planned fix.** Stop trying to patch the pointers. `RXRST` resets the receive
+logic but leaves the driver guessing where the part's write pointer ended up,
+and that guess is what fails. Now that a *verified* full reset exists — the
+errata-19 sequence, which demonstrably brings a part back from an unknown
+state — the recovery path should re-run that entire sequence plus the M2
+configuration, rather than the partial `RXRST` patch-up.
+
+This needs `net_stack` to hand the SPI bus back to the M1/M2 FSM on demand and
+take it again when configuration completes, which is a real change to how the
+two share the bus rather than a local edit.
+
+### Operational notes learned the hard way
+
+- **A JTAG reflash is not a power cycle.** The FPGA restarts; the ENC28J60 does
+  not. Fix 4 makes the driver recover from this, but a genuinely wedged module
+  has still needed a power cycle. Measurements taken right after a reflash
+  misled this project more than once.
+- **Check the build identifier.** The OLED shows `BLD xxxx` (line 2) precisely
+  because there is one USB-Blaster between two boards, and they routinely sit
+  one flash apart. Several wrong conclusions came from testing a node quietly
+  running an older bitstream.
+- **The console only speaks when a counter changes** — so a wedged node and an
+  idle one look identical. Hence the heartbeat and the `P=`/`K=` fields; that
+  instrumentation is what made fault 3 findable at all.
+
+## Next steps, in order
+
+1. Re-run the full ENC28J60 init (errata-19 reset + M2 config) as the recovery
+   path for a corrupt packet chain, replacing the `RXRST` resync.
+2. Re-soak both nodes; the target is a clean run well past 1000 frames with
+   `X` staying at 0.
+3. Only then, board-to-board M4: type on Host A's console, see it on Host B's
+   OLED. Both nodes must be on the same build first.
+4. Merge `m4-udp-messaging` into `main`.
+5. Optional once stable: ICMP echo, so `ping` succeeds outright rather than
+   resolving ARP and timing out.
+
 
 ## Verification approach
 

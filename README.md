@@ -353,7 +353,7 @@ and throughput that collapses under load.
 | M1.5 | OLED — I²C master, SSD1306 driver, status text | Status text on the panel | Simulated ✓, hardware ✓ (Host A — see [docs/oled.md](docs/oled.md#troubleshooting-panel-blank-after-power-up-despite-clean-ic) for the controller-ID and reset-button gotchas) |
 | M1.6 | Console — UART, buttons, typed message to OLED | Type in PowerShell, see it on the panel | Simulated ✓, hardware ✓ (Host A, byte-perfect round trip) |
 | M2 | Link up — RX/TX buffer, MAC filter, MAC config, MAC address, RXEN | Link LED on both boards | RXEN confirmed on hardware ✓ (Host A), link LED pending |
-| M3 | Ping — ARP responder (ICMP echo deferred to M4) | `ping` moves from "unreachable" to "timed out" | Simulated ✓, hardware ✓ (both nodes; needed the TX-CRC and `ECON1`/`RXEN` fixes above) |
+| M3 | Ping — ARP responder (ICMP echo deferred to M4) | `ping` moves from "unreachable" to "timed out" | Simulated ✓, hardware ✓ (both nodes). Answering, but not yet *sustained* — see [docs/plan.md](docs/plan.md) |
 | M4 | UDP echo + **message display** | Host A sends `Hello World`, Host B shows it | Simulated ✓, receive half hardware ✓ (PC broadcast → OLED); board-to-board pending |
 | M5 | Max speed — UDP blaster + measurement | ≥ 9.3 Mbit/s, loss-free | Not started |
 
