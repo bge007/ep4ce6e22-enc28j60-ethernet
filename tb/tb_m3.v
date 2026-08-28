@@ -336,6 +336,51 @@ module tb_m3;
         check(arp_replies_sent == 16'd2,
               "no ARP reply for the poisoned-pointer frame (SPI helper wedged?)");
 
+        // ------------------------------------------------------------------
+        // Scenario 4: corrupt packet chain -> full re-initialisation.
+        // ------------------------------------------------------------------
+        // A next-packet pointer beyond ERXND cannot be followed, so the design
+        // asks eth_top to bring the whole part back up rather than trying to
+        // repair the pointer itself. Pulsing ECON1.RXRST and assuming the next
+        // packet then sits at ERXST was the previous approach and did not
+        // work on hardware: the part's write pointer ends up somewhere the
+        // driver cannot know, the next read returns stale bytes, and the chain
+        // is corrupt again -- rx_resyncs climbed into the hundreds while the
+        // part stopped delivering packets entirely.
+        //
+        // This testbench stands in for eth_top: it waits for the request, then
+        // drops and re-raises `start` exactly as the real handoff does.
+        // Aimed at OTHER_IP so the frame is walked and cleaned up but not
+        // answered -- that keeps the reply count unambiguous, so the recovery
+        // frame below is the only thing that can produce reply number 3.
+        inject_arp_request(OTHER_IP, 16'h7FFF, dut.next_rdpt);  // > ERXND (0x19FF)
+
+        // The request must appear -- if it never does, the corrupt pointer was
+        // followed instead of being caught, and this wait times out.
+        wait (dut.reinit_req == 1'b1);
+        check(dut.rx_resyncs == 16'd1, "rx_resyncs not incremented on a corrupt chain");
+
+        // eth_top takes the SPI bus away, re-runs reset + config, hands back.
+        start = 1'b0;
+        #20_000;
+        check(dut.reinit_req == 1'b0, "reinit_req not released once the bus was taken");
+        check(dut.cs_n == 1'b1, "net_stack still driving CS after asking for re-init");
+        model.pktcnt = 8'd0;                 // a real reset empties the part
+        model.cur_ptr = 16'h0000;
+        start = 1'b1;
+
+        // And the node must go back to serving ARP normally afterwards.
+        inject_arp_request(OUR_IP, NEXT_PTR, 16'h0000);
+        // frames_seen ticks in cleanup, which is where next_rdpt is updated --
+        // waiting on the reply alone races that, since the reply goes out
+        // first. Five frames: three before the corrupt one, the corrupt one,
+        // and this recovery frame.
+        wait (frames_seen == 16'd5);
+        #10_000;
+        check(arp_replies_sent == 16'd3, "no ARP reply after the re-initialisation");
+        check(dut.next_rdpt == NEXT_PTR,
+              "next_rdpt not tracking again after the re-initialisation");
+
         // RXEN must have survived every bank select, TX sequence and
         // cleanup above. It did not before ECON1 moved to BFS/BFC:
         // each whole-byte bank select switched the receiver off.
@@ -343,7 +388,7 @@ module tb_m3;
               "RXEN was cleared outside an RXRST pulse (bank select clobbered ECON1)");
 
         if (errors == 0)
-            $display("PASS: ARP reply byte-correct, ERXRDPT/EPKTCNT/ETXND/TXRTS all correct, RXEN never dropped, non-matching IP ignored, poisoned next-pointer survived");
+            $display("PASS: ARP reply byte-correct, ERXRDPT/EPKTCNT/ETXND/TXRTS all correct, RXEN never dropped, non-matching IP ignored, poisoned next-pointer survived, corrupt chain triggers a full re-init and recovers");
         else
             $display("%0d ERROR(S)", errors);
         $finish;

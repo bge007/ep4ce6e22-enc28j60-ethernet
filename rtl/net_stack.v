@@ -90,7 +90,13 @@ module net_stack #(
     // physically left the chip, which no amount of switch-side counting can
     // tell us. tsv_stat2/3 carry Transmit Done, CRC/length errors, collision
     // count, defer, giant and underrun.
-    output reg  [15:0]  rx_resyncs,   // times the RX pointer chain was rebuilt
+    output reg  [15:0]  rx_resyncs,   // times the RX chain was found corrupt
+    // Asserted when the RX packet chain is provably corrupt and this module
+    // wants the whole ENC28J60 brought back up from scratch. eth_top takes
+    // the SPI bus back, re-runs the hardware reset, the errata-19 reset
+    // sequence and the M2 configuration, then hands the bus back -- at which
+    // point `start` rises again and the FSM below restarts from S_INIT0.
+    output reg          reinit_req,
     // Liveness diagnostics. "Counters frozen" on the console is ambiguous:
     // it means the FSM is stuck OR the part is reporting no packets, and
     // those need completely different fixes. polls increments once per
@@ -300,15 +306,14 @@ module net_stack #(
                // Hard receive-logic resync: pulse ECON1.RXRST and rebuild the
                // RX FIFO bounds from scratch. Reached only when the packet
                // chain is provably corrupt (see next_ptr_ok).
-               S_RXRST0     = 7'd66, S_RXRST1     = 7'd67,
-               S_RXR_ST0    = 7'd68, S_RXR_ST1    = 7'd69,
-               S_RXR_ND0    = 7'd70, S_RXR_ND1    = 7'd71,
-               S_RXR_RD0    = 7'd72, S_RXR_RD1    = 7'd73,
+               // Ask eth_top for a full re-init, then wait for it to take
+               // the bus. Replaces the old RXRST-based resync -- see the
+               // comment on S_REINIT_REQ below for why that could not work.
+               S_REINIT_REQ = 7'd66, S_REINIT_WAIT = 7'd67,
                // Generic 1-shot BFS/BFC, and the two-step bank select built
                // on top of it (clear BSEL, then set the wanted bits).
                S_BF_OP      = 7'd74, S_BF_DATA    = 7'd75,
-               S_BSEL0      = 7'd76, S_BSEL1      = 7'd77,
-               S_RXRSTA     = 7'd78;
+               S_BSEL0      = 7'd76, S_BSEL1      = 7'd77;
 
     reg [6:0]  state, ret_state;    // ret_state: where the generic WCR/RCR returns to
     reg [4:0]  wcr_addr;
@@ -507,12 +512,18 @@ module net_stack #(
             arp_reqs         <= 16'd0;
             last_etype       <= 16'd0;
             rx_resyncs       <= 16'd0;
+            reinit_req       <= 1'b0;
             tsv_count        <= 16'd0;
             tsv_wire         <= 16'd0;
             tsv_stat2        <= 8'd0;
             tsv_stat3        <= 8'd0;
         end else if (!start && state == S_INIT0) begin
-            // idle until eth_top hands off the bus
+            // Idle until eth_top hands off the bus. Dropping reinit_req here
+            // is what ends the request: by the time this branch is taken,
+            // eth_top has already lowered `start` (taken the bus), so it has
+            // certainly latched the request. Holding it any longer would make
+            // eth_top re-init forever.
+            reinit_req <= 1'b0;
         end else begin
             case (state)
                 // ---- one-time: AUTOINC on, prepare to poll bank 1 ----
@@ -990,69 +1001,37 @@ module net_stack #(
                     if (!next_ptr_ok) rx_resyncs <= rx_resyncs + 16'd1;
                     frames_seen <= frames_seen + 16'd1;
                     wcr_addr    <= A_ECON2; wcr_data <= 8'hC0;   // AUTOINC + PKTDEC
-                    // A corrupt chain needs the receive logic genuinely reset,
-                    // not just our own pointer moved: the hardware's write
-                    // pointer is wherever it is, so assuming the next packet
-                    // sits at ERXST simply re-reads stale bytes forever. That
-                    // was the observed failure -- rx_resyncs climbing steadily
-                    // while last_etype alternated 0600/0303 on a loop.
-                    ret_state   <= next_ptr_ok ? S_INIT1 : S_RXRSTA;
+                    // A corrupt chain needs the whole part brought back up,
+                    // not just our own pointer moved. Pulsing ECON1.RXRST and
+                    // assuming the next packet then sits at ERXST was tried
+                    // and does not work: the hardware's write pointer ends up
+                    // somewhere this module cannot know, so the very next read
+                    // returns stale bytes and the chain is corrupt again. On
+                    // hardware that showed as rx_resyncs climbing into the
+                    // hundreds while the part quietly stopped delivering
+                    // packets altogether -- EPKTCNT reading 0 forever with the
+                    // poll loop still running.
+                    ret_state   <= next_ptr_ok ? S_INIT1 : S_REINIT_REQ;
                     state       <= S_WCR_OP;
                 end
 
-                // ---- hard receive-logic resync ----
-                // ECON1.RXRST (bit 6) resets the receive logic; RXEN is held
-                // clear throughout, which is also the condition the datasheet
-                // requires before ERXST/ERXND may be modified ("The pointers
-                // must not be modified while the receive logic is enabled").
-                // ERXRDPT goes back to ERXND (0x19FF -- odd, satisfying the
-                // errata), handing the whole FIFO back to the hardware.
-                // S_INIT1 re-enables RXEN and returns to polling.
-                S_RXRSTA: begin
-                    bf_addr <= A_ECON1; bf_mask <= 8'h04; bf_set <= 1'b0;  // RXEN=0
-                    bf_ret  <= S_RXRST0;
-                    state   <= S_BF_OP;
+                // ---- ask for a full re-initialisation ----
+                // Release the bus and raise the request. eth_top lowers
+                // `start` when it takes the bus over; parking in S_INIT0 then
+                // waits (see the !start guard at the top of this block) until
+                // the part has been reset and reconfigured and `start` rises
+                // again, at which point the FSM restarts cleanly.
+                S_REINIT_REQ: begin
+                    cs_n       <= 1'b1;
+                    spi_start  <= 1'b0;
+                    reinit_req <= 1'b1;
+                    state      <= S_REINIT_WAIT;
                 end
-                S_RXRST0: begin
-                    bf_addr <= A_ECON1; bf_mask <= 8'h40; bf_set <= 1'b1;  // RXRST=1
-                    bf_ret  <= S_RXRST1;
-                    state   <= S_BF_OP;
-                end
-                S_RXRST1: begin
-                    bf_addr <= A_ECON1; bf_mask <= 8'h40; bf_set <= 1'b0;  // RXRST=0
-                    bf_ret  <= S_RXR_ST0;
-                    state   <= S_BF_OP;
-                end
-                S_RXR_ST0: begin
-                    wcr_addr  <= A_ERXSTL; wcr_data <= ERXST[7:0];
-                    ret_state <= S_RXR_ST1;
-                    state     <= S_WCR_OP;
-                end
-                S_RXR_ST1: begin
-                    wcr_addr  <= A_ERXSTH; wcr_data <= ERXST[15:8];
-                    ret_state <= S_RXR_ND0;
-                    state     <= S_WCR_OP;
-                end
-                S_RXR_ND0: begin
-                    wcr_addr  <= A_ERXNDL; wcr_data <= ERXND[7:0];
-                    ret_state <= S_RXR_ND1;
-                    state     <= S_WCR_OP;
-                end
-                S_RXR_ND1: begin
-                    wcr_addr  <= A_ERXNDH; wcr_data <= ERXND[15:8];
-                    ret_state <= S_RXR_RD0;
-                    state     <= S_WCR_OP;
-                end
-                S_RXR_RD0: begin
-                    wcr_addr  <= A_ERXRDPTL; wcr_data <= ERXND[7:0];
-                    ret_state <= S_RXR_RD1;
-                    state     <= S_WCR_OP;
-                end
-                S_RXR_RD1: begin
-                    wcr_addr  <= A_ERXRDPTH; wcr_data <= ERXND[15:8];
-                    ret_state <= S_INIT1;      // re-enables RXEN, back to polling
-                    state     <= S_WCR_OP;
-                end
+                S_REINIT_WAIT:
+                    if (!start) begin
+                        next_rdpt <= ERXST;   // the part restarts empty
+                        state     <= S_INIT0;
+                    end
 
                 // ---- M4: send the current typed line as a UDP message ----
                 // Standalone TX, not triggered by an RX frame -- mirrors the

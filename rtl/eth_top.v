@@ -108,6 +108,7 @@ module eth_top #(
     wire [15:0] eth_arp_reqs, eth_last_etype;
     wire [15:0] eth_tsv_count, eth_tsv_wire, eth_rx_resyncs;
     wire [15:0] eth_polls;
+    wire        net_reinit_req;   // net_stack found the RX chain corrupt
     wire [7:0]  eth_pktcnt;
 
     wire [7:0]  eth_tsv_s2, eth_tsv_s3;
@@ -152,6 +153,7 @@ module eth_top #(
         .arp_reqs(eth_arp_reqs), .last_etype(eth_last_etype),
         .rx_resyncs(eth_rx_resyncs),
         .polls(eth_polls), .last_pktcnt(eth_pktcnt),
+        .reinit_req(net_reinit_req),
         .tsv_count(eth_tsv_count), .tsv_wire(eth_tsv_wire),
         .tsv_stat2(eth_tsv_s2), .tsv_stat3(eth_tsv_s3)
     );
@@ -392,6 +394,7 @@ module eth_top #(
     reg        enc_rst_q;
     reg        m12_ph2;             // explicit SPI phase; never infer it from data
     reg [7:0]  estat_rb;
+    reg [15:0] reinits;             // full re-initialisations performed
     reg [7:0]  erevid;
     reg        spi_busy_d;
 
@@ -419,6 +422,7 @@ module eth_top #(
             enc_rst_q  <= 1'b0;
             m12_ph2    <= 1'b0;
             estat_rb   <= 8'h00;
+            reinits    <= 16'd0;
             erevid     <= 8'h00;
             m2_started <= 1'b0;
             m2_idx     <= 6'd0;
@@ -638,11 +642,29 @@ module eth_top #(
                     state     <= S_HANDOFF;
                 end
 
-                // Terminal: net_stack owns m12_cs_n/m12_spi_start/m12_spi_tx from here.
-                // erevid stays frozen at its last M1/M2 value; the LED and
-                // OLED continue showing that snapshot rather than polling
-                // forever, since polling would race net_stack for the bus.
-                S_HANDOFF: ;
+                // net_stack owns m12_cs_n/m12_spi_start/m12_spi_tx from here,
+                // until it asks for a re-initialisation. erevid stays frozen
+                // at its last M1/M2 value; the LED and OLED continue showing
+                // that snapshot rather than polling forever, since polling
+                // would race net_stack for the bus.
+                //
+                // Recovery from a corrupt RX packet chain runs through here
+                // rather than inside net_stack, because the only thing known
+                // to bring the part back from an unknown state is the full
+                // sequence this FSM already implements: pulse the hardware
+                // reset line, clear ECON2.PWRSV, system reset, confirm
+                // ESTAT.CLKRDY, then rewrite the whole M2 configuration.
+                // Dropping eth_ready hands the SPI bus back automatically via
+                // the mux above, and net_stack parks itself until it returns.
+                S_HANDOFF:
+                    if (net_reinit_req) begin
+                        eth_ready  <= 1'b0;
+                        m2_started <= 1'b0;    // let S_LATCH re-run the M2 config
+                        m2_idx     <= 6'd0;
+                        wait_cnt   <= 23'd0;
+                        reinits    <= reinits + 16'd1;
+                        state      <= S_HW_RESET;
+                    end
 
                 default: state <= S_HW_RESET;
             endcase
@@ -673,7 +695,7 @@ module eth_top #(
     // glance which image is on which board is worth more than it sounds:
     // several wrong conclusions during bring-up came from testing a node that
     // was quietly running an older bitstream.
-    localparam [15:0] BUILD_ID = 16'h0001;
+    localparam [15:0] BUILD_ID = 16'h0002;
 
     localparam integer OCOLS = 21;
 

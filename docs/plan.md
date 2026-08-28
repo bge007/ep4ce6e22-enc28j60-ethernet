@@ -166,7 +166,43 @@ pre-fix RTL rather than pass vacuously.
 | Host A, 15 min | 275 → 904 | 0 → 414 | Clean ~8.5 min, then resync storm |
 | Host A, current | 602 | **0** | Healthy, counters advancing |
 
-### The one remaining fault
+### Update: the remaining fault, and what replaced the resync
+
+**Implemented.** The `RXRST` resync is gone. When the packet chain is found
+corrupt, `net_stack` now raises `reinit_req` and parks itself; `eth_top` drops
+`eth_ready`, which hands the SPI bus back through the existing mux, and re-runs
+the *entire* bring-up — hardware reset line, `ECON2.PWRSV` clear, system reset,
+`ESTAT.CLKRDY` confirmation, then the full M2 configuration — before handing
+the bus back. `net_stack`'s existing `!start` guard parks it in `S_INIT0`
+meanwhile, so no new handshake signal was needed.
+
+`tb_m3` scenario 4 injects a next-packet pointer beyond `ERXND`, stands in for
+`eth_top` by dropping and re-raising `start`, and checks the node serves ARP
+again afterwards. Verified to time out against RTL with the request disabled.
+
+**Soak result (25 minutes, Host B):**
+
+| metric | value |
+|---|---|
+| frames processed | **7,863** |
+| ARP requests parsed | 1,492 |
+| ARP replies sent | 53 |
+| chain corruptions (`X`) | **0** |
+| longest stall | 1 s |
+| FSM alive at end | yes |
+
+Against previous runs that died at 122–365 frames, that is roughly a
+twenty-fold improvement with no failure at all. The switch agrees: port
+counters read 54 unicast in / 3,456 octets — exactly 64 bytes per reply,
+matching the console's count, with every error counter at zero.
+
+**Caveat worth keeping.** `X` stayed at 0 for the whole soak, so the chain
+never corrupted and **the new recovery path was never exercised on hardware**.
+It is proven in simulation only. Whether the corruption is genuinely gone or
+merely rarer is not yet established — the honest reading is that this soak
+shows the *fault* did not recur, not that the *recovery* works on real silicon.
+
+### The original fault, as first diagnosed
 
 After a period of correct operation the RX packet-chain pointer goes out of
 range. The driver detects this (`next_ptr_ok`) and pulses `ECON1.RXRST` to
