@@ -265,6 +265,25 @@ written. `-Port COMx` narrows the scan when both consoles are attached; with
 two boards answering the script refuses to guess rather than pick one, since
 JTAG cannot say which the blaster is on.
 
+Verified on hardware with both boards attached: the scan lists
+`COM5=HostA, COM6=HostB` and refuses to proceed, and `-Port COM6` then targets
+Host B and confirms `Verify: Host B running build 0003.`
+
+### Both nodes on build 0003
+
+| | Host A | Host B |
+|---|---|---|
+| frames (15 min) | 612 | 457 |
+| ARP requests parsed | 601 | 448 |
+| replies sent | 26 | 25 |
+| chain corruptions | **0** | **0** |
+| longest stall | 11 s | 11 s |
+| reachable after | yes | yes |
+
+The switch learns both on their documented ports -- `0242.ce60.0001` on
+Gi1/0/13 and `0242.ce60.0002` on Gi1/0/17 -- with every error counter at zero.
+M3 is now stable on both nodes, which unblocks board-to-board M4.
+
 ## Next steps, in order
 
 1. Re-run the full ENC28J60 init (errata-19 reset + M2 config) as the recovery
