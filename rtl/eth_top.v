@@ -695,7 +695,7 @@ module eth_top #(
     // glance which image is on which board is worth more than it sounds:
     // several wrong conclusions during bring-up came from testing a node that
     // was quietly running an older bitstream.
-    localparam [15:0] BUILD_ID = 16'h0002;
+    localparam [15:0] BUILD_ID = 16'h0003;
 
     localparam integer OCOLS = 21;
 
@@ -769,6 +769,7 @@ module eth_top #(
         .net_eir(eth_last_eir), .net_estat(eth_last_estat),
         .net_arpreqs(eth_arp_reqs), .net_etype(eth_last_etype),
         .net_resyncs(eth_rx_resyncs),
+        .build_id(BUILD_ID),
         .net_polls(eth_polls), .net_pktcnt(eth_pktcnt),
         .net_tsvcount(eth_tsv_count), .net_tsvwire(eth_tsv_wire),
         .net_tsvs2(eth_tsv_s2), .net_tsvs3(eth_tsv_s3),

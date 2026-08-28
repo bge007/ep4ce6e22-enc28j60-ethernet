@@ -16,6 +16,19 @@
 #   .\build.ps1 -HostB      # target Host B (192.168.1.61, MAC ...:02) instead
 #                           # of Host A -- combine with any of the above, e.g.
 #                           # .\build.ps1 -HostB -Prog
+#   .\build.ps1 -Auto       # ask the board which host it is over its console
+#                           # cable and pick -HostB automatically; combine with
+#                           # any programming flag, e.g. .\build.ps1 -Auto -Flash
+#   .\build.ps1 -Port COM6  # with -Auto, listen on this port only instead of
+#                           # scanning every COM port
+#
+# -Auto exists because the two boards are identical to JTAG -- openFPGALoader
+# reports the same EP4CE6 IDCODE for either -- so nothing in the programming
+# path can tell them apart, and flashing Host A's bitstream onto Host B gives
+# it Host A's IP and MAC. The running design announces "ID HOST=x BLD=yyyy" on
+# its console every few seconds, so the console cable can answer the question
+# the JTAG cable cannot. After programming, -Auto reads the line back and
+# checks the board now reports the build that was just written.
 #
 # -HostB compiles the *same* RTL through a second Quartus revision
 # (enc28j60_eth_hostb.qsf, which only overrides HOST_ID and the output
@@ -48,6 +61,8 @@ param(
     [switch]$Flash,
     [switch]$FlashOnly,
     [switch]$HostB,
+    [switch]$Auto,
+    [string]$Port,
     [string]$QuartusBin,
     [string]$QuestaBin,
     [string]$LoaderExe,
@@ -78,6 +93,87 @@ $GIT_USR_BIN = "C:\Program Files\Git\usr\bin"
 # Quartus names generated files after the *revision*, not the project --
 # output_files\enc28j60_eth.sof for Host A, output_files_hostb\
 # enc28j60_eth_hostb.sof for Host B (its own qsf sets that output dir).
+# ---------------------------------------------------------------------------
+# Board identity over the console cable
+# ---------------------------------------------------------------------------
+# The design prints "ID HOST=A BLD=0002" every ~2.7 s. Listening for it beats
+# the alternatives: reading the power-on banner needs a reset (which throws
+# away whatever state we are trying to preserve), and sending a query byte
+# would collide with the typed-message feature that shares this port.
+
+function Get-BoardId([string]$name, [int]$seconds = 6) {
+    $sp = $null
+    try {
+        $sp = New-Object System.IO.Ports.SerialPort $name,115200,None,8,one
+        $sp.Open()
+        Start-Sleep -Milliseconds 300
+        $sp.ReadExisting() | Out-Null
+        $buf = New-Object System.Text.StringBuilder
+        $end = (Get-Date).AddSeconds($seconds)
+        while ((Get-Date) -lt $end) {
+            Start-Sleep -Milliseconds 200
+            if ($sp.BytesToRead -gt 0) { [void]$buf.Append($sp.ReadExisting()) }
+            $m = [regex]::Match($buf.ToString(), 'ID HOST=([AB]) BLD=([0-9A-F]{4})')
+            if ($m.Success) {
+                return [pscustomobject]@{
+                    Port  = $name
+                    Host  = $m.Groups[1].Value
+                    Build = $m.Groups[2].Value
+                }
+            }
+        }
+        return $null
+    } catch {
+        # A port held open by a soak or a terminal is not an error worth
+        # stopping the build for -- it just is not the board we can see.
+        Write-Verbose "${name}: $($_.Exception.Message)"
+        return $null
+    } finally {
+        if ($sp -and $sp.IsOpen) { $sp.Close() }
+    }
+}
+
+function Find-Boards([string]$only) {
+    $ports = if ($only) { @($only) } else { [System.IO.Ports.SerialPort]::GetPortNames() }
+    $found = @()
+    foreach ($n in $ports) {
+        $id = Get-BoardId $n
+        if ($id) {
+            $found += $id
+            Write-Host ("  {0}: Host {1}, build {2}" -f $id.Port, $id.Host, $id.Build)
+        }
+    }
+    return $found
+}
+
+# The build identifier the RTL will report once this bitstream is running.
+function Get-SourceBuildId {
+    $m = Select-String -Path "rtl\eth_top.v" -Pattern "BUILD_ID = 16'h([0-9A-Fa-f]{4})"
+    if ($m) { return $m.Matches[0].Groups[1].Value.ToUpper() }
+    return $null
+}
+
+$detected = $null
+if ($Auto) {
+    Write-Host "=== Identifying board over the console cable ===" -ForegroundColor Cyan
+    $boards = Find-Boards $Port
+    if ($boards.Count -eq 0) {
+        throw ("No board answered on any console port. Check the console cable, " +
+               "or pass -HostB explicitly. (A board mid-flash, powered off, or " +
+               "with its port already open elsewhere will not answer.)")
+    }
+    if ($boards.Count -gt 1) {
+        throw ("More than one board answered: " +
+               (($boards | ForEach-Object { "$($_.Port)=Host$($_.Host)" }) -join ", ") +
+               ". JTAG cannot tell which one the blaster is on, so pass -Port " +
+               "<the one being programmed>, or -HostB explicitly.")
+    }
+    $detected = $boards[0]
+    $HostB = [switch]($detected.Host -eq "B")
+    Write-Host ("Targeting Host {0} (from {1}, currently running build {2})" -f `
+        $detected.Host, $detected.Port, $detected.Build) -ForegroundColor Green
+}
+
 $REVISION = if ($HostB) { "enc28j60_eth_hostb" } else { "enc28j60_eth" }
 $OUTDIR   = if ($HostB) { "output_files_hostb" } else { "output_files" }
 
@@ -137,9 +233,32 @@ function Program-Board([switch]$ToFlash) {
     if ($LASTEXITCODE -ne 0) { throw "Programming failed -- check WinUSB driver via zadig" }
 }
 
+# ---- verify what actually ended up on the board -------------------------
+# Only meaningful once the design is running in SRAM: -Flash on its own leaves
+# the spiOverJtag bridge loaded, so the console stays silent until a SRAM load
+# or a power cycle. This is the check that catches the two failures this
+# project hit repeatedly -- programming the wrong board, and testing a node
+# that was quietly still running an older bitstream.
+function Verify-Board {
+    if (-not ($Auto -and $detected)) { return }
+    $expect = Get-SourceBuildId
+    Start-Sleep -Seconds 2
+    $now = Get-BoardId $detected.Port 12
+    if (-not $now) {
+        Write-Host ("Verify: {0} did not answer after programming. If only the config flash was written, the bridge bitstream is still loaded -- run -ProgOnly or power-cycle, then re-check." -f $detected.Port) -ForegroundColor Yellow
+    } elseif ($expect -and $now.Build -ne $expect) {
+        Write-Host ("Verify: board reports build {0}, expected {1} -- the new bitstream is NOT running." -f $now.Build, $expect) -ForegroundColor Red
+    } elseif ($now.Host -ne $detected.Host) {
+        Write-Host ("Verify: board now reports Host {0}, was Host {1} -- identity changed unexpectedly." -f $now.Host, $detected.Host) -ForegroundColor Red
+    } else {
+        Write-Host ("Verify: Host {0} running build {1}." -f $now.Host, $now.Build) -ForegroundColor Green
+    }
+}
+
 # ---- program only, from the existing .sof -------------------------------
 if ($onlyMode) {
     Program-Board -ToFlash:$FlashOnly
+    Verify-Board
     Write-Host "Done." -ForegroundColor Green
     exit 0
 }
@@ -191,5 +310,6 @@ if ($willFlash) {
 } elseif ($Prog) {
     Program-Board
 }
+if ($Prog -or $willFlash) { Verify-Board }
 
 Write-Host "Done." -ForegroundColor Green

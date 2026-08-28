@@ -242,6 +242,29 @@ two share the bus rather than a local edit.
   idle one look identical. Hence the heartbeat and the `P=`/`K=` fields; that
   instrumentation is what made fault 3 findable at all.
 
+### Identifying a board without resetting it
+
+The two boards are indistinguishable to JTAG -- openFPGALoader reports the same
+EP4CE6 IDCODE for either -- so nothing in the programming path can tell them
+apart, and flashing Host A's bitstream onto Host B silently gives it Host A's
+IP and MAC. That mistake was made more than once.
+
+The console cable can answer what the JTAG cable cannot. The design now emits
+
+```
+ID HOST=A BLD=0003
+```
+
+every ~2.7 s. Listening for it beats the alternatives: reading the power-on
+banner needs a reset, which throws away the state under investigation, and a
+query byte would collide with the typed-message feature sharing that port.
+
+`build.ps1 -Auto` reads that line, picks the revision itself, and -- after
+programming -- reads it back to confirm the board now reports the build just
+written. `-Port COMx` narrows the scan when both consoles are attached; with
+two boards answering the script refuses to guess rather than pick one, since
+JTAG cannot say which the blaster is on.
+
 ## Next steps, in order
 
 1. Re-run the full ENC28J60 init (errata-19 reset + M2 config) as the recovery

@@ -69,6 +69,7 @@ module uart_console #(
     input  wire [15:0] net_arpreqs,  // frames parsed as an ARP request
     input  wire [15:0] net_etype,    // EtherType of the last frame walked
     input  wire [15:0] net_resyncs,  // RX pointer-chain rebuilds
+    input  wire [15:0] build_id,     // bitstream identity, echoed on the ID line
     input  wire [15:0] net_polls,    // EPKTCNT polls completed (liveness)
     input  wire [7:0]  net_pktcnt,   // EPKTCNT value the last poll read
     input  wire [15:0] net_tsvcount, // transmit status vector: byte count
@@ -121,7 +122,7 @@ module uart_console #(
     // ------------------------------------------------------------------
     localparam T_NONE     = 4'd0, T_BANNER   = 4'd1, T_KEYS = 4'd2, T_ECHO = 4'd3,
                T_OLED_RDY = 4'd4, T_OLED_ERR = 4'd5, T_ETH = 4'd6, T_NET = 4'd7,
-               T_TSV      = 4'd8;
+               T_TSV      = 4'd8, T_ID       = 4'd9;
 
     localparam integer BANNER_N   = 24;
     localparam integer KEYS_N     = 11;
@@ -132,6 +133,11 @@ module uart_console #(
     localparam integer NET_N      = 62;   // "NET F=... R=... E=.. S=.. A=... T=... X=... P=xxxx K=xx\r\n"
 
     localparam integer TSV_N      = 31;   // TSV n=xxxx w=xxxx s2=xx s3=xx + CRLF
+    // "ID HOST=A BLD=xxxx\r\n" -- emitted every ~2.7 s so a tool can identify
+    // the board by listening alone: no reset (which would lose the run's
+    // state), no keystroke (which would collide with the typed-message
+    // feature), and no dependence on catching the power-on banner.
+    localparam integer ID_N       = 20;
 
     function [7:0] hexdig(input [3:0] n);
         hexdig = (n < 4'd10) ? (8'h30 + n) : (8'h41 + n - 4'd10);
@@ -145,6 +151,17 @@ module uart_console #(
         banner[12]="d"; banner[13]="e"; banner[14]=" "; banner[15]="?";
         banner[16]=" "; banner[17]="r"; banner[18]="e"; banner[19]="a";
         banner[20]="d"; banner[21]="y"; banner[22]=8'h0D; banner[23]=8'h0A;
+    end
+
+    reg [7:0] id_msg [0:ID_N-1];
+    initial begin
+        id_msg[ 0]="I"; id_msg[ 1]="D"; id_msg[ 2]=" ";
+        id_msg[ 3]="H"; id_msg[ 4]="O"; id_msg[ 5]="S"; id_msg[ 6]="T"; id_msg[ 7]="=";
+        id_msg[ 8]="?";                                  // patched: A or B
+        id_msg[ 9]=" ";
+        id_msg[10]="B"; id_msg[11]="L"; id_msg[12]="D"; id_msg[13]="=";
+        id_msg[14]="?"; id_msg[15]="?"; id_msg[16]="?"; id_msg[17]="?";
+        id_msg[18]=8'h0D; id_msg[19]=8'h0A;
     end
 
     reg [7:0] oled_rdy_msg [0:OLED_RDY_N-1];
@@ -163,6 +180,8 @@ module uart_console #(
     reg [3:0] cur;
     reg [5:0] sidx;
     reg       req_banner, req_keys, req_echo, req_oled_rdy, req_oled_err, req_eth, req_net;
+    reg       req_id;
+    reg [2:0] id_div;      // divides the heartbeat down to roughly 2.7 s
     reg       oled_ready_d, oled_nack_d, eth_ready_d;   // for edge detection
     reg [15:0] net_frames_d, net_replies_d, net_arpreqs_d, net_tsvwire_d;
 
@@ -182,6 +201,7 @@ module uart_console #(
                          (cur == T_ETH)      ? ETH_N[5:0]      :
                          (cur == T_NET)      ? NET_N[5:0]      :
                          (cur == T_TSV)      ? TSV_N[5:0]      :
+                         (cur == T_ID)       ? ID_N[5:0]       :
                                                ECHO_N[5:0];
 
     // "ETH C1=xx\r\n" -- ECON1 readback as hex.
@@ -349,6 +369,13 @@ module uart_console #(
         endcase
     end
 
+    wire [7:0] id_byte = (sidx == 6'd8)  ? (8'd64 + HOST_ID)          // 1->"A", 2->"B"
+                       : (sidx == 6'd14) ? hexdig(build_id[15:12])
+                       : (sidx == 6'd15) ? hexdig(build_id[11:8])
+                       : (sidx == 6'd16) ? hexdig(build_id[7:4])
+                       : (sidx == 6'd17) ? hexdig(build_id[3:0])
+                                         : id_msg[sidx[4:0]];
+
     wire [7:0] send_byte = (cur == T_BANNER) ?
                              ((sidx == 6'd15) ? (8'd64 + HOST_ID) : banner[sidx[4:0]])
                          : (cur == T_KEYS)     ? keys_byte
@@ -357,6 +384,7 @@ module uart_console #(
                          : (cur == T_ETH)      ? eth_byte
                          : (cur == T_NET)      ? net_byte
                          : (cur == T_TSV)      ? tsv_byte
+                         : (cur == T_ID)       ? id_byte
                                                : echo_byte;
 
     always @(posedge clk) begin
@@ -374,6 +402,8 @@ module uart_console #(
             req_oled_err <= 1'b0;
             req_eth      <= 1'b0;
             req_net      <= 1'b0;
+            req_id       <= 1'b1;   // announce identity as soon as the port opens
+            id_div       <= 3'd0;
             oled_ready_d <= 1'b0;
             oled_nack_d  <= 1'b0;
             eth_ready_d  <= 1'b0;
@@ -430,7 +460,11 @@ module uart_console #(
             if (net_frames != net_frames_d || net_replies != net_replies_d
                 || net_arpreqs != net_arpreqs_d)
                 req_net <= 1'b1;
-            if (hb_cnt == 24'd0) req_net <= 1'b1;
+            if (hb_cnt == 24'd0) begin
+                req_net <= 1'b1;
+                id_div  <= id_div + 3'd1;
+                if (id_div == 3'd7) req_id <= 1'b1;
+            end
 
             // ---- transmit -----------------------------------------------
             if (cur == T_NONE) begin
@@ -439,6 +473,7 @@ module uart_console #(
                 // early), then OLED status, then a received line, then key
                 // state. Key changes are the most frequent and least urgent.
                 if      (req_banner)   begin cur <= T_BANNER;   req_banner   <= 1'b0; end
+                else if (req_id)       begin cur <= T_ID;       req_id       <= 1'b0; end
                 else if (req_eth)      begin cur <= T_ETH;      req_eth      <= 1'b0; end
                 else if (req_net)      begin cur <= T_NET;      req_net      <= 1'b0; end
                 else if (req_tsv)      begin cur <= T_TSV;      req_tsv      <= 1'b0; end

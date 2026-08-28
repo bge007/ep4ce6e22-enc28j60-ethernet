@@ -177,6 +177,17 @@ module tb_uart;
               "banner not transmitted, or host letter wrong");
         $display("INFO: banner seen, %0d bytes so far", seen_n);
 
+        // ---------------- identity line ----------------
+        // Emitted once at power-up and then every ~2.7 s, so a build tool can
+        // work out which board is on the other end of a console cable by
+        // listening alone -- no reset (which would throw away the run's state)
+        // and no keystroke (which would collide with the typed-message path).
+        #(BIT_NS * 12 * 22);
+        check(contains("ID HOST=A BLD=", 14) >= 0,
+              "identity line missing or malformed");
+        $display("INFO: ID line seen");
+        seen_n = 0;
+
         // ---------------- button press ----------------
         seen_n = 0;
         @(posedge clk); keys = 4'b0001; keys_changed = 1; @(posedge clk); keys_changed = 0;
@@ -226,7 +237,7 @@ module tb_uart;
         $display("INFO: backspace OK");
 
         if (errors == 0)
-            $display("PASS: UART loopback, banner, key lines, line receive, echo, backspace");
+            $display("PASS: UART loopback, banner, ID line, key lines, line receive, echo, backspace");
         else
             $display("%0d ERROR(S)", errors);
         $finish;
