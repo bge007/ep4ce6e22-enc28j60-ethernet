@@ -228,6 +228,33 @@ This needs `net_stack` to hand the SPI bus back to the M1/M2 FSM on demand and
 take it again when configuration completes, which is a real change to how the
 two share the bus rather than a local edit.
 
+### The MAC readback doubles as an SPI wiring check
+
+After Host B's jumpers were disturbed and reconnected, it ran but behaved
+badly: 633 re-initialisations in eight minutes against Host A's zero, on the
+same bitstream. The console's `MAC=` field identified it immediately:
+
+```
+Host B   MAC=020000000000  then  MAC=000000000000     <- differs every re-init
+Host A   MAC=0242CE600001                             <- stable, correct
+```
+
+`MAADR` is written once at init and read back on every re-init, so it is a
+free, continuously-repeated integrity check on the SPI read path. A value that
+is wrong *and changes between reads* is not a firmware bug — the same image was
+correct on the other node — it is a marginal connection. Reseating the jumpers
+took Host B to a stable `0242CE600002` and zero re-inits:
+
+| | frames | arp | replies | re-inits |
+|---|---|---|---|---|
+| Host A | 437 | 239 | 11 | **0** |
+| Host B (before) | 2,421 | 194 | 14 | **633** |
+| Host B (after) | 435 | 239 | 11 | **0** |
+
+The switch counters were clean throughout — one FCS error per port, ever — so
+the Ethernet side was never the problem, and looking there would have wasted
+the time that the MAC readback saved.
+
 ### Operational notes learned the hard way
 
 - **A JTAG reflash is not a power cycle.** The FPGA restarts; the ENC28J60 does
