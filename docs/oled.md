@@ -153,40 +153,65 @@ Quartus 25.1 with the OLED integrated: 0 errors, **602 / 6,272 LE (10 %)**,
 **Confirmed on real hardware, Host A, 2026-08-23** — see the troubleshooting
 note below for the one gotcha that came with it.
 
-## Troubleshooting: panel blank after power-up, despite clean I²C
+## Cold-boot blank panel — solved, and worth understanding
 
-Symptom seen on real hardware: I²C traffic is correct (the console's
-diagnostic UART lines report `OLED READY`, meaning every ACK came back
-clean — wiring, address, and 3.3 V level are all fine), but the panel itself
-stays completely dark.
+For a long time this design only lit the panel **after a manual RESET press**;
+a fresh flash or a power cycle came up dark. Clean I²C ACKs throughout, which
+is exactly what made it confusing. It turned out to be **two independent
+faults stacked on top of each other**, both fixed as of 2026-08-27.
 
-This can have two different causes, and it's worth telling them apart:
+### Fault 1 — the design had no power-on reset
 
-1. **Wrong controller init sequence.** This was the actual root cause the
-   first time the panel came up completely blank on this project — the driver
-   was sending the SH1106 sequence (see the datasheet note above) on hardware
-   that is really SSD1306. The fix was switching the driver's init table and
-   column addressing to the plain SSD1306 form, which is what `oled_ssd1306.v`
-   now does unconditionally.
-2. **Power-on-reset timing**, seen afterward even with the correct SSD1306
-   sequence: the FPGA starts sending I²C commands the instant its own reset
-   releases — essentially immediately after configuration — but the panel's
-   charge pump and internal POR circuit may not have settled yet, especially
-   right after a fresh `openFPGALoader`/JTAG programming cycle (which doesn't
-   power-cycle the OLED module at all, only reconfigures the FPGA). The
-   commands arrive, the slave ACKs them, but the panel ignores them.
+Cyclone IV registers come out of configuration cleared, so `rst_sync` powered
+up as `2'b00` and `rst` was **never asserted**. Every reset block in the whole
+design was skipped, and every register whose reset value is not zero started
+life wrong. For the OLED that meant `clear_pass = 0`, so the driver skipped
+straight past the pass that sends **display-on (`0xAF`)** — the panel was
+initialised correctly and simply never switched on.
 
-**Fix for (2): press the FPGA board's own reset button.** That re-asserts
-`nrst`, which restarts `oled_ssd1306`'s entire init → clear → display-on
-sequence from scratch, by which point the panel's own POR has settled — the
-second attempt sticks. A fresh `-ProgOnly` reflash of the FPGA is exactly the
-situation most likely to trigger this, since it changes the FPGA's logic
-without power-cycling the OLED module.
+It affected more than the display: `uart_console`'s `req_banner` was clear (no
+boot banner) and, more seriously, `m12_cs_n`/`cs_n` were clear, meaning the
+**ENC28J60's chip-select was asserted from the moment the FPGA configured**.
 
-If pressing reset doesn't bring the panel back, re-check wiring/power first
-(the two things at the top of this page), and if this is a different unit of
-the same-looking module, reconsider whether it is really the other controller
-after all.
+Fixed with a real POR in `eth_top.v` (~1.3 ms), whose registers are initialised
+in their declarations so Quartus bakes the power-up values into the bitstream.
+
+### Fault 2 — the panel's own POR is slower than our first I²C write
+
+With the POR fixed, a *power cycle* still came up blank. On a cold boot the
+module powers up simultaneously with the FPGA, and the driver began sending
+init after only ~100 ms. **The panel ACKs those bytes and ignores them.** That
+is why clean ACKs never flagged it, and why pressing RESET always worked — by
+then the panel had long since settled.
+
+Fixed two ways, because a longer delay alone is just a tuned guess about
+someone else's RC circuit:
+
+- `POR_TICKS` 100 ms → **500 ms** before the first I²C byte
+- `REINIT_TICKS` — **one-shot re-init at 1 s**: redo init → clear → display-on
+  → repaint, so a cold boot recovers even if the first attempt was too early
+
+That repaint at the end matters. The first version of the retry left the panel
+blank *permanently*, because the re-init's clear pass blanks the display and
+`eth_top` only issues a refresh when something **changes**. Nothing had
+changed, so nothing repainted. The driver now finishes its own re-init with a
+text paint out of `textbuf`.
+
+**Verified on hardware in all three cases: after flashing, after a RESET press,
+and after a power cycle.**
+
+### If a blank panel ever comes back
+
+Work in this order — the cheap checks first:
+
+1. **Is the design actually running?** Check the serial console for the boot
+   banner. No banner means no POR (or no bitstream), not a display problem.
+2. **Power cycle vs. `-Prog`.** A power cycle boots from **config flash**, not
+   SRAM. If a fix reached only SRAM via `-Prog`, the board reverts to whatever
+   `-Flash`/`-FlashOnly` last wrote. Re-run `-FlashOnly` after any fix that
+   must survive power loss.
+3. **Only then** suspect wiring, the 3.3 V rail, or controller identity — and
+   remember a clean ACK proves none of those.
 
 ## The message protocol (milestone 4)
 

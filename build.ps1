@@ -16,6 +16,19 @@
 #   .\build.ps1 -HostB      # target Host B (192.168.1.61, MAC ...:02) instead
 #                           # of Host A -- combine with any of the above, e.g.
 #                           # .\build.ps1 -HostB -Prog
+#   .\build.ps1 -Auto       # ask the board which host it is over its console
+#                           # cable and pick -HostB automatically; combine with
+#                           # any programming flag, e.g. .\build.ps1 -Auto -Flash
+#   .\build.ps1 -Port COM6  # with -Auto, listen on this port only instead of
+#                           # scanning every COM port
+#
+# -Auto exists because the two boards are identical to JTAG -- openFPGALoader
+# reports the same EP4CE6 IDCODE for either -- so nothing in the programming
+# path can tell them apart, and flashing Host A's bitstream onto Host B gives
+# it Host A's IP and MAC. The running design announces "ID HOST=x BLD=yyyy" on
+# its console every few seconds, so the console cable can answer the question
+# the JTAG cable cannot. After programming, -Auto reads the line back and
+# checks the board now reports the build that was just written.
 #
 # -HostB compiles the *same* RTL through a second Quartus revision
 # (enc28j60_eth_hostb.qsf, which only overrides HOST_ID and the output
@@ -48,6 +61,8 @@ param(
     [switch]$Flash,
     [switch]$FlashOnly,
     [switch]$HostB,
+    [switch]$Auto,
+    [string]$Port,
     [string]$QuartusBin,
     [string]$QuestaBin,
     [string]$LoaderExe,
@@ -78,6 +93,87 @@ $GIT_USR_BIN = "C:\Program Files\Git\usr\bin"
 # Quartus names generated files after the *revision*, not the project --
 # output_files\enc28j60_eth.sof for Host A, output_files_hostb\
 # enc28j60_eth_hostb.sof for Host B (its own qsf sets that output dir).
+# ---------------------------------------------------------------------------
+# Board identity over the console cable
+# ---------------------------------------------------------------------------
+# The design prints "ID HOST=A BLD=0002" every ~2.7 s. Listening for it beats
+# the alternatives: reading the power-on banner needs a reset (which throws
+# away whatever state we are trying to preserve), and sending a query byte
+# would collide with the typed-message feature that shares this port.
+
+function Get-BoardId([string]$name, [int]$seconds = 6) {
+    $sp = $null
+    try {
+        $sp = New-Object System.IO.Ports.SerialPort $name,115200,None,8,one
+        $sp.Open()
+        Start-Sleep -Milliseconds 300
+        $sp.ReadExisting() | Out-Null
+        $buf = New-Object System.Text.StringBuilder
+        $end = (Get-Date).AddSeconds($seconds)
+        while ((Get-Date) -lt $end) {
+            Start-Sleep -Milliseconds 200
+            if ($sp.BytesToRead -gt 0) { [void]$buf.Append($sp.ReadExisting()) }
+            $m = [regex]::Match($buf.ToString(), 'ID HOST=([AB]) BLD=([0-9A-F]{4})')
+            if ($m.Success) {
+                return [pscustomobject]@{
+                    Port  = $name
+                    Host  = $m.Groups[1].Value
+                    Build = $m.Groups[2].Value
+                }
+            }
+        }
+        return $null
+    } catch {
+        # A port held open by a soak or a terminal is not an error worth
+        # stopping the build for -- it just is not the board we can see.
+        Write-Verbose "${name}: $($_.Exception.Message)"
+        return $null
+    } finally {
+        if ($sp -and $sp.IsOpen) { $sp.Close() }
+    }
+}
+
+function Find-Boards([string]$only) {
+    $ports = if ($only) { @($only) } else { [System.IO.Ports.SerialPort]::GetPortNames() }
+    $found = @()
+    foreach ($n in $ports) {
+        $id = Get-BoardId $n
+        if ($id) {
+            $found += $id
+            Write-Host ("  {0}: Host {1}, build {2}" -f $id.Port, $id.Host, $id.Build)
+        }
+    }
+    return $found
+}
+
+# The build identifier the RTL will report once this bitstream is running.
+function Get-SourceBuildId {
+    $m = Select-String -Path "rtl\eth_top.v" -Pattern "BUILD_ID = 16'h([0-9A-Fa-f]{4})"
+    if ($m) { return $m.Matches[0].Groups[1].Value.ToUpper() }
+    return $null
+}
+
+$detected = $null
+if ($Auto) {
+    Write-Host "=== Identifying board over the console cable ===" -ForegroundColor Cyan
+    $boards = Find-Boards $Port
+    if ($boards.Count -eq 0) {
+        throw ("No board answered on any console port. Check the console cable, " +
+               "or pass -HostB explicitly. (A board mid-flash, powered off, or " +
+               "with its port already open elsewhere will not answer.)")
+    }
+    if ($boards.Count -gt 1) {
+        throw ("More than one board answered: " +
+               (($boards | ForEach-Object { "$($_.Port)=Host$($_.Host)" }) -join ", ") +
+               ". JTAG cannot tell which one the blaster is on, so pass -Port " +
+               "<the one being programmed>, or -HostB explicitly.")
+    }
+    $detected = $boards[0]
+    $HostB = [switch]($detected.Host -eq "B")
+    Write-Host ("Targeting Host {0} (from {1}, currently running build {2})" -f `
+        $detected.Host, $detected.Port, $detected.Build) -ForegroundColor Green
+}
+
 $REVISION = if ($HostB) { "enc28j60_eth_hostb" } else { "enc28j60_eth" }
 $OUTDIR   = if ($HostB) { "output_files_hostb" } else { "output_files" }
 
@@ -115,7 +211,44 @@ Set-Location $root
 # writes the board's non-volatile config flash instead of SRAM -- needs the
 # spiOverJtag bridge, which openFPGALoader finds via OPENFPGALOADER_SOJ_DIR
 # and --fpga-part. Verified on hardware 2026-08-23.
+# A clone USB-Blaster that has come loose, or a board without power on its
+# JTAG header, does not fail cleanly: openFPGALoader enumerates over USB and
+# then reads a constant noise pattern off TDO, reporting it as an unknown
+# IDCODE. Checking first turns a confusing late failure -- after a two-minute
+# compile -- into an immediate, actionable one. This has bitten repeatedly.
+function Assert-JtagChain {
+    if (Test-Path $GIT_USR_BIN) { $env:PATH = "$GIT_USR_BIN;$env:PATH" }
+    # Not "2>&1": in Windows PowerShell that wraps each stderr line from a
+    # native exe in an ErrorRecord (NativeCommandError), which surfaces as a
+    # thrown error rather than text we can match on. Send stderr to a file and
+    # read it back instead.
+    # ...and the script-wide "Stop" preference makes even a file-redirected
+    # native stderr terminating, so relax it for the duration of the probe.
+    $errFile = [System.IO.Path]::GetTempFileName()
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $stdout = & $LOADER -c usb-blaster --detect 2>$errFile
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    $out = ($stdout | Out-String) + (Get-Content $errFile -Raw -ErrorAction SilentlyContinue)
+    Remove-Item $errFile -ErrorAction SilentlyContinue
+    if ($out -match '0x20f10dd') { return }
+    if ($out -match 'IDCODE:\s*(0x[0-9a-fA-F]+)') {
+        throw ("JTAG chain returned $($Matches[1]), which is not a Cyclone IV IDCODE " +
+               "(expected 0x20f10dd). That pattern is a floating TDO: the USB-Blaster " +
+               "enumerated, but the target is not answering. Check the 10-pin ribbon is " +
+               "seated and the board is powered, then retry.")
+    }
+    if ($out -match 'unable to open ftdi device') {
+        throw "USB-Blaster not found. Check it is plugged in and the WinUSB driver is bound (zadig)."
+    }
+    throw "JTAG chain check failed:`n$out"
+}
+
 function Program-Board([switch]$ToFlash) {
+    Assert-JtagChain
     $sof = "$OUTDIR\$REVISION.sof"
     $rbf = "$OUTDIR\$REVISION.rbf"
     if (-not (Test-Path $sof)) {
@@ -123,7 +256,7 @@ function Program-Board([switch]$ToFlash) {
     }
     $env:PATH = "$QUARTUS;$env:PATH"
     quartus_cpf -c $sof $rbf
-    if (-not $?) { throw "sof -> rbf conversion failed" }
+    if ($LASTEXITCODE -ne 0) { throw "sof -> rbf conversion failed" }
 
     if ($ToFlash) {
         Write-Host "=== Programming config flash (non-volatile) ===" -ForegroundColor Cyan
@@ -134,12 +267,35 @@ function Program-Board([switch]$ToFlash) {
         Write-Host "=== Programming board (SRAM, volatile) ===" -ForegroundColor Cyan
         & $LOADER -c usb-blaster $rbf
     }
-    if (-not $?) { throw "Programming failed -- check WinUSB driver via zadig" }
+    if ($LASTEXITCODE -ne 0) { throw "Programming failed -- check WinUSB driver via zadig" }
+}
+
+# ---- verify what actually ended up on the board -------------------------
+# Only meaningful once the design is running in SRAM: -Flash on its own leaves
+# the spiOverJtag bridge loaded, so the console stays silent until a SRAM load
+# or a power cycle. This is the check that catches the two failures this
+# project hit repeatedly -- programming the wrong board, and testing a node
+# that was quietly still running an older bitstream.
+function Verify-Board {
+    if (-not ($Auto -and $detected)) { return }
+    $expect = Get-SourceBuildId
+    Start-Sleep -Seconds 2
+    $now = Get-BoardId $detected.Port 12
+    if (-not $now) {
+        Write-Host ("Verify: {0} did not answer after programming. If only the config flash was written, the bridge bitstream is still loaded -- run -ProgOnly or power-cycle, then re-check." -f $detected.Port) -ForegroundColor Yellow
+    } elseif ($expect -and $now.Build -ne $expect) {
+        Write-Host ("Verify: board reports build {0}, expected {1} -- the new bitstream is NOT running." -f $now.Build, $expect) -ForegroundColor Red
+    } elseif ($now.Host -ne $detected.Host) {
+        Write-Host ("Verify: board now reports Host {0}, was Host {1} -- identity changed unexpectedly." -f $now.Host, $detected.Host) -ForegroundColor Red
+    } else {
+        Write-Host ("Verify: Host {0} running build {1}." -f $now.Host, $now.Build) -ForegroundColor Green
+    }
 }
 
 # ---- program only, from the existing .sof -------------------------------
 if ($onlyMode) {
     Program-Board -ToFlash:$FlashOnly
+    Verify-Board
     Write-Host "Done." -ForegroundColor Green
     exit 0
 }
@@ -157,10 +313,10 @@ if ($willSimulate) {
     vlog -sv ../rtl/spi_master.v ../rtl/i2c_master.v ../rtl/oled_ssd1306.v `
              ../rtl/uart_tx.v ../rtl/uart_rx.v ../rtl/uart_console.v `
              ../rtl/debounce.v ../rtl/net_stack.v ../rtl/eth_top.v `
-             ../tb/tb_m1.v ../tb/tb_m2.v ../tb/tb_m3.v ../tb/tb_oled.v ../tb/tb_uart.v
-    if (-not $?) { throw "vlog failed" }
+             ../tb/tb_m1.v ../tb/tb_m2.v ../tb/tb_m3.v ../tb/tb_m4.v ../tb/tb_oled.v ../tb/tb_uart.v
+    if ($LASTEXITCODE -ne 0) { throw "vlog failed" }
 
-    foreach ($tb in @("tb_m1", "tb_m2", "tb_m3", "tb_oled", "tb_uart")) {
+    foreach ($tb in @("tb_m1", "tb_m2", "tb_m3", "tb_m4", "tb_oled", "tb_uart")) {
         Write-Host "--- $tb ---" -ForegroundColor DarkCyan
         $out = (vsim -c -do "run -all; quit -f" $tb) -join "`n"
         Write-Host $out
@@ -179,7 +335,7 @@ $env:PATH = "$QUARTUS;$env:PATH"
 # every revision alike.
 Copy-Item rtl\font5x8.mem . -Force
 quartus_sh --flow compile enc28j60_eth -c $REVISION
-if (-not $?) { throw "Quartus compile failed -- see $OUTDIR\*.rpt" }
+if ($LASTEXITCODE -ne 0) { throw "Quartus compile failed -- see $OUTDIR\*.rpt" }
 
 Select-String -Path "$OUTDIR\$REVISION.fit.rpt" `
     -Pattern "Total logic elements|Total registers|Total pins" |
@@ -191,5 +347,6 @@ if ($willFlash) {
 } elseif ($Prog) {
     Program-Board
 }
+if ($Prog -or $willFlash) { Verify-Board }
 
 Write-Host "Done." -ForegroundColor Green

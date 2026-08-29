@@ -69,6 +69,13 @@ module tb_uart;
     reg [15:0] net_replies_tb = 16'd0;
     reg [7:0]  net_eir_tb     = 8'd0;
     reg [7:0]  net_estat_tb   = 8'd0;
+    reg [15:0] net_arpreqs_tb = 16'd0;
+    reg [15:0] net_etype_tb   = 16'd0;
+    reg [15:0] net_resyncs_tb  = 16'd0;
+    reg [15:0] net_tsvcount_tb = 16'd0;
+    reg [15:0] net_tsvwire_tb  = 16'd0;
+    reg [7:0]  net_tsvs2_tb     = 8'd0;
+    reg [7:0]  net_tsvs3_tb     = 8'd0;
 
     uart_console #(.CLK_HZ(CLK_HZ), .BAUD(BAUD), .HOST_ID(8'd1)) dut (
         .clk(clk), .rst(rst),
@@ -78,6 +85,10 @@ module tb_uart;
         .eth_ready(eth_ready_tb), .eth_econ1(eth_econ1_tb),
         .net_frames(net_frames_tb), .net_replies(net_replies_tb),
         .net_eir(net_eir_tb), .net_estat(net_estat_tb),
+        .net_arpreqs(net_arpreqs_tb), .net_etype(net_etype_tb),
+        .net_resyncs(net_resyncs_tb),
+        .net_tsvcount(net_tsvcount_tb), .net_tsvwire(net_tsvwire_tb),
+        .net_tsvs2(net_tsvs2_tb), .net_tsvs3(net_tsvs3_tb),
         .uart_rx_pin(host_rx), .uart_tx_pin(host_tx));
 
     // Collect everything the console transmits.
@@ -166,6 +177,20 @@ module tb_uart;
               "banner not transmitted, or host letter wrong");
         $display("INFO: banner seen, %0d bytes so far", seen_n);
 
+        // ---------------- identity line ----------------
+        // Emitted once at power-up and then every ~2.7 s, so a build tool can
+        // work out which board is on the other end of a console cable by
+        // listening alone -- no reset (which would throw away the run's state)
+        // and no keystroke (which would collide with the typed-message path).
+        // The ID line is 52 characters now that it carries the MAC readback;
+        // this window has to clear the whole line or the checks that follow
+        // start reading mid-sentence.
+        #(BIT_NS * 12 * 56);
+        check(contains("ID HOST=A BLD=", 14) >= 0,
+              "identity line missing or malformed");
+        $display("INFO: ID line seen");
+        seen_n = 0;
+
         // ---------------- button press ----------------
         seen_n = 0;
         @(posedge clk); keys = 4'b0001; keys_changed = 1; @(posedge clk); keys_changed = 0;
@@ -215,7 +240,7 @@ module tb_uart;
         $display("INFO: backspace OK");
 
         if (errors == 0)
-            $display("PASS: UART loopback, banner, key lines, line receive, echo, backspace");
+            $display("PASS: UART loopback, banner, ID line, key lines, line receive, echo, backspace");
         else
             $display("%0d ERROR(S)", errors);
         $finish;

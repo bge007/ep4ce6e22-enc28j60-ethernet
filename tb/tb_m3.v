@@ -54,6 +54,16 @@ module enc28j60_buf_model (
     end
 
     wire [1:0] cur_bank = econ1[1:0];
+
+    // Once RXEN has been turned on, it must stay on except while RXRST is
+    // being pulsed (the datasheet requires RXEN clear to move ERXST/ERXND).
+    // Bank selects silently clearing it is the hardware bug this guards.
+    reg rxen_was_on = 1'b0;
+    reg rxen_dropped = 1'b0;
+    always @(econ1) begin
+        if (econ1[2]) rxen_was_on = 1'b1;
+        else if (rxen_was_on && !econ1[6]) rxen_dropped = 1'b1;
+    end
     localparam [7:0] OP_RBM = 8'h3A, OP_WBM = 8'h7A;
 
     // Observation flags for the testbench.
@@ -90,6 +100,13 @@ module enc28j60_buf_model (
                         if (byte_idx == 1) cur_ptr = {regs[0][3], regs[0][2]}; // EWRPTH:EWRPTL
                         buf_mem[cur_ptr] = shift_in;
                         cur_ptr = cur_ptr + 16'd1;
+                    end else if (opcode[7:5] == 3'b100 && opcode[4:0] == 5'h1F) begin
+                        // BFS ECON1: OR the mask in, touching nothing else.
+                        econ1 = econ1 | shift_in;
+                        if (shift_in[3]) txrts_seen = 1'b1;      // TXRTS bit
+                    end else if (opcode[7:5] == 3'b101 && opcode[4:0] == 5'h1F) begin
+                        // BFC ECON1: AND the inverted mask in.
+                        econ1 = econ1 & ~shift_in;
                     end else if (opcode[7:5] == 3'b010) begin   // WCR
                         if (opcode[4:0] == 5'h1F) begin
                             econ1 = shift_in;
@@ -146,7 +163,9 @@ module tb_m3;
         .cs_n(cs_n), .spi_start(spi_start), .spi_tx(spi_tx),
         .spi_rx(spi_rx), .spi_busy(spi_busy),
         .frames_seen(frames_seen), .arp_replies_sent(arp_replies_sent),
-        .last_eir(last_eir), .last_estat(last_estat)
+        .last_eir(last_eir), .last_estat(last_estat),
+        .arp_reqs(), .last_etype(),
+        .rx_resyncs(), .tsv_count(), .tsv_wire(), .tsv_stat2(), .tsv_stat3()
     );
 
     // spi_master itself has no chip-select notion (matching eth_top.v's
@@ -219,12 +238,17 @@ module tb_m3;
         start = 1'b1;
 
         wait (arp_replies_sent == 16'd1);
-        #10_000;   // let TXWAIT's fixed delay and cleanup finish
+        // arp_replies_sent bumps in S_TXWAIT, BEFORE the EIR/ESTAT/TSV reads
+        // and the RX-buffer cleanup. Wait on frames_seen, which bumps in
+        // S_CLEANUP4 once everything has actually finished -- a fixed delay
+        // here silently breaks whenever the post-TX sequence grows.
+        wait (frames_seen == 16'd1);
+        #2_000;
 
         check(frames_seen == 16'd1, "frames_seen != 1 after one ARP request");
 
         // ---- TX buffer: control byte + 42-byte reply, byte-correct ----
-        check(model.buf_mem[16'h1A00] == 8'h00, "TX control byte is not 0x00");
+        check(model.buf_mem[16'h1A00] == 8'h07, "TX control byte is not 0x07 (POVERRIDE|PCRCEN|PPADEN)");
         // dest MAC = sender's MAC
         check(model.buf_mem[16'h1A01] == SENDER_MAC[47:40], "reply dest MAC[0] wrong");
         check(model.buf_mem[16'h1A06] == SENDER_MAC[7:0],   "reply dest MAC[5] wrong");
@@ -289,8 +313,82 @@ module tb_m3;
               "arp_replies_sent changed on a request for a different IP");
         check(model.pktcnt == 8'd0, "EPKTCNT not decremented for the second frame");
 
+        // ------------------------------------------------------------------
+        // Scenario 3: a next-packet pointer that poisons the SPI helpers.
+        // ------------------------------------------------------------------
+        // The two-byte helpers used to work out "have I sent the opcode yet?"
+        // by comparing the byte just shifted out against the opcode itself.
+        // That breaks whenever the DATA byte equals the OPCODE byte: the test
+        // stays true, the helper resends the data forever, and the whole FSM
+        // wedges with the packet still pending.
+        //
+        // WCR(ERXRDPTL) is 0x4C, and ERXRDPT is written as next_ptr - 1. A
+        // next pointer of 0x004D therefore writes 0x4C into opcode 0x4C and
+        // hangs the pre-fix design. On hardware the ring pointer walks all
+        // 256 low-byte values, so this hit roughly every 128 frames -- nodes
+        // wedged after 122, 156 and 134 frames.
+        //
+        // There is no assertion here on purpose: if the FSM wedges,
+        // frames_seen never reaches 3 and the testbench times out.
+        inject_arp_request(OUR_IP, 16'h004D, dut.next_rdpt);
+        wait (frames_seen == 16'd3);
+        #10_000;
+        check(arp_replies_sent == 16'd2,
+              "no ARP reply for the poisoned-pointer frame (SPI helper wedged?)");
+
+        // ------------------------------------------------------------------
+        // Scenario 4: corrupt packet chain -> full re-initialisation.
+        // ------------------------------------------------------------------
+        // A next-packet pointer beyond ERXND cannot be followed, so the design
+        // asks eth_top to bring the whole part back up rather than trying to
+        // repair the pointer itself. Pulsing ECON1.RXRST and assuming the next
+        // packet then sits at ERXST was the previous approach and did not
+        // work on hardware: the part's write pointer ends up somewhere the
+        // driver cannot know, the next read returns stale bytes, and the chain
+        // is corrupt again -- rx_resyncs climbed into the hundreds while the
+        // part stopped delivering packets entirely.
+        //
+        // This testbench stands in for eth_top: it waits for the request, then
+        // drops and re-raises `start` exactly as the real handoff does.
+        // Aimed at OTHER_IP so the frame is walked and cleaned up but not
+        // answered -- that keeps the reply count unambiguous, so the recovery
+        // frame below is the only thing that can produce reply number 3.
+        inject_arp_request(OTHER_IP, 16'h7FFF, dut.next_rdpt);  // > ERXND (0x19FF)
+
+        // The request must appear -- if it never does, the corrupt pointer was
+        // followed instead of being caught, and this wait times out.
+        wait (dut.reinit_req == 1'b1);
+        check(dut.rx_resyncs == 16'd1, "rx_resyncs not incremented on a corrupt chain");
+
+        // eth_top takes the SPI bus away, re-runs reset + config, hands back.
+        start = 1'b0;
+        #20_000;
+        check(dut.reinit_req == 1'b0, "reinit_req not released once the bus was taken");
+        check(dut.cs_n == 1'b1, "net_stack still driving CS after asking for re-init");
+        model.pktcnt = 8'd0;                 // a real reset empties the part
+        model.cur_ptr = 16'h0000;
+        start = 1'b1;
+
+        // And the node must go back to serving ARP normally afterwards.
+        inject_arp_request(OUR_IP, NEXT_PTR, 16'h0000);
+        // frames_seen ticks in cleanup, which is where next_rdpt is updated --
+        // waiting on the reply alone races that, since the reply goes out
+        // first. Five frames: three before the corrupt one, the corrupt one,
+        // and this recovery frame.
+        wait (frames_seen == 16'd5);
+        #10_000;
+        check(arp_replies_sent == 16'd3, "no ARP reply after the re-initialisation");
+        check(dut.next_rdpt == NEXT_PTR,
+              "next_rdpt not tracking again after the re-initialisation");
+
+        // RXEN must have survived every bank select, TX sequence and
+        // cleanup above. It did not before ECON1 moved to BFS/BFC:
+        // each whole-byte bank select switched the receiver off.
+        check(!model.rxen_dropped,
+              "RXEN was cleared outside an RXRST pulse (bank select clobbered ECON1)");
+
         if (errors == 0)
-            $display("PASS: ARP reply byte-correct, ERXRDPT/EPKTCNT/ETXND/TXRTS all correct, non-matching IP correctly ignored");
+            $display("PASS: ARP reply byte-correct, ERXRDPT/EPKTCNT/ETXND/TXRTS all correct, RXEN never dropped, non-matching IP ignored, poisoned next-pointer survived, corrupt chain triggers a full re-init and recovers");
         else
             $display("%0d ERROR(S)", errors);
         $finish;

@@ -11,8 +11,9 @@
 // Checks:
 //   * RX buffer:  ERXST=0x0000, ERXND=0x19FF, ERXRDPT=0x19FF, ETXST=0x1A00
 //   * bank 1:     ERXFCON = 0xA1 (unicast+broadcast+CRC, no pattern match)
-//   * bank 2:     MACON1=0x01, MACON3=0x33 (full duplex), MACON4=0x00,
-//                 MABBIPG=0x15, MAIPGL=0x12, MAIPGH=0x0C, MAMXFL=0x05EE
+//   * bank 2:     MACON1=0x01, MACON3=0x32 (half duplex, matching the
+//                 link the switch actually negotiates), MACON4=0x40 (DEFER),
+//                 MABBIPG=0x12, MAIPGL=0x12, MAIPGH=0x0C, MAMXFL=0x05EE
 //   * bank 3:     MAC address 02:42:CE:60:00:01, correctly placed at the
 //                 documented MAADR5/6/3/4/1/2 file order
 //   * ECON1 ends with RXEN=1 and bank=3 (bits 0x07)
@@ -42,12 +43,20 @@ module enc28j60_bank_model (
     reg [7:0] opcode;
 
     reg [7:0] econ1;                    // common register, not banked
+    reg [7:0] econ2;                    // likewise; errata 19 clears PWRSV here
+    reg       got_pwrsv_clr;
+    // MAC and MII registers shift out a DUMMY byte before the data
+    // (datasheet 4.2.1, Figure 4-4); ETH and common registers do not. Getting
+    // this wrong is why the design's earlier MAC-register readbacks returned
+    // nonsense, so the model has to reproduce it or the fix is untested.
+    reg       mac_read;
+    reg [7:0] pend_val;
     reg [7:0] regs [0:3][0:31];         // [bank][addr] -- everything else
 
     integer bi, ai;
     initial begin
         miso = 0; shift_in = 0; shift_out = 0; bit_cnt = 0; byte_idx = 0;
-        opcode = 0; econ1 = 0;
+        opcode = 0; econ1 = 0; econ2 = 0; got_pwrsv_clr = 0; mac_read = 0; pend_val = 0;
         for (bi = 0; bi < 4; bi = bi + 1)
             for (ai = 0; ai < 32; ai = ai + 1) regs[bi][ai] = 8'h00;
     end
@@ -70,17 +79,37 @@ module enc28j60_bank_model (
                 if (byte_idx == 0) begin
                     opcode = shift_in;
                     if (shift_in[7:5] == 3'b000) begin         // RCR
-                        if (shift_in[4:0] == 5'h1F)
+                        // Common registers (1Bh and up) are never MAC-type,
+                        // whichever bank happens to be selected.
+                        mac_read = (shift_in[4:0] < 5'h1B) &&
+                                   ((cur_bank == 2'd2) ||
+                                    (cur_bank == 2'd3 && shift_in[4:0] <= 5'h05));
+                        pend_val = regs[cur_bank][shift_in[4:0]];
+                        if (mac_read)
+                            shift_out = 8'hA5;                 // dummy filler
+                        else if (shift_in[4:0] == 5'h1F)
                             shift_out = econ1;
                         else if (shift_in[4:0] == 5'h12 && cur_bank == 2'd3)
                             shift_out = 8'h06;                 // EREVID
+                        else if (shift_in[4:0] == 5'h1D)
+                            // ESTAT: CLKRDY set, unimplemented bit 3 clear --
+                            // what errata 19 step 5 checks before configuring.
+                            shift_out = 8'h01;
                         else
                             shift_out = regs[cur_bank][shift_in[4:0]];
                     end
                 end else begin
+                    // second byte of a MAC read: now the real data
+                    if (mac_read && byte_idx == 1) shift_out = pend_val;
                     if (opcode[7:5] == 3'b010) begin           // WCR
                         if (opcode[4:0] == 5'h1F) econ1 = shift_in;
                         else                       regs[cur_bank][opcode[4:0]] = shift_in;
+                    end
+                    // BFC ECON2: errata 19 step 1. A part left in Power Save
+                    // mode ignores the System Reset command entirely.
+                    if (opcode[7:5] == 3'b101 && opcode[4:0] == 5'h1E) begin
+                        econ2         = econ2 & ~shift_in;
+                        got_pwrsv_clr = 1'b1;
                     end
                 end
                 byte_idx = byte_idx + 1;
@@ -187,17 +216,30 @@ module tb_m2;
 
         // ---- MAC config, bank 2 ----
         check_reg(2'd2, 5'h00, 8'h01, "MACON1 (MARXEN)");
-        check_reg(2'd2, 5'h02, 8'h33, "MACON3 (pad/CRC/full-duplex)");
-        check_reg(2'd2, 5'h03, 8'h00, "MACON4");
-        check_reg(2'd2, 5'h04, 8'h15, "MABBIPG (full-duplex value)");
+        check_reg(2'd2, 5'h02, 8'h32, "MACON3 (pad/CRC/half-duplex)");
+        check_reg(2'd2, 5'h03, 8'h40, "MACON4 (DEFER set, datasheet 6.5 step 3)");
+        check_reg(2'd2, 5'h04, 8'h12, "MABBIPG (half-duplex value)");
         check_reg(2'd2, 5'h06, 8'h12, "MAIPGL");
         check_reg(2'd2, 5'h07, 8'h0C, "MAIPGH");
         check_reg(2'd2, 5'h0A, 8'hEE, "MAMXFLL (1518 low)");
         check_reg(2'd2, 5'h0B, 8'h05, "MAMXFLH (1518 high)");
 
+        // ---- PHY write via MII: PHCON2 = 0x0100 (HDLDIS), datasheet 6.6 ----
+        check_reg(2'd2, 5'h14, 8'h10, "MIREGADR (PHCON2 address)");
+        check_reg(2'd2, 5'h16, 8'h00, "MIWRL (PHCON2 low byte)");
+        check_reg(2'd2, 5'h17, 8'h01, "MIWRH (PHCON2 high byte = HDLDIS)");
+
         // ---- MAC address, bank 3, documented reversed file order ----
         check_reg(2'd3, 5'h00, 8'h00, "MAADR5 (byte 5 = 0x00)");
         check_reg(2'd3, 5'h01, 8'h01, "MAADR6 (byte 6 = HOST_ID = 0x01)");
+
+        // The design must now read those same registers back correctly. The
+        // unicast receive filter matches incoming frames against MAADR1..6,
+        // so a MAC that was written but not verified is exactly the fault
+        // that let a node answer broadcast ARP while silently dropping every
+        // unicast frame addressed to it.
+        check(dut.mac_rb == 48'h0242CE600001,
+              "MAADR readback wrong -- MAC-register read protocol broken");
         check_reg(2'd3, 5'h02, 8'hCE, "MAADR3 (byte 3 = 0xCE)");
         check_reg(2'd3, 5'h03, 8'h60, "MAADR4 (byte 4 = 0x60)");
         check_reg(2'd3, 5'h04, 8'h02, "MAADR1 (byte 1 = 0x02)");
@@ -221,7 +263,7 @@ module tb_m2;
         check(dut.erevid === 8'h06, "M1 EREVID readback broken by M2 changes");
 
         if (errors == 0)
-            $display("PASS: M2 link/MAC init -- RX/TX buffer, filter, MAC config, MAC address, RXEN, readback, UART report all correct");
+            $display("PASS: M2 link/MAC init -- RX/TX buffer, filter, MAC config, MAC address + verified readback, RXEN, UART report all correct");
         else
             $display("%0d ERROR(S)", errors);
         $finish;

@@ -28,6 +28,8 @@ module enc28j60_model (
     integer   byte_idx;         // byte index within current CS frame
     reg [7:0] opcode;
     reg [7:0] econ1;
+    reg [7:0] econ2;
+    reg       got_pwrsv_clr;
     reg       got_src;
     reg       got_hw_reset;
 
@@ -61,6 +63,10 @@ module enc28j60_model (
                     if (opcode[7:5] == 3'b000) begin
                         if (econ1[1:0] == 2'b11 && opcode[4:0] == 5'h12)
                             shift_out = EREVID_B7;
+                        else if (opcode[4:0] == 5'h1D)
+                            // ESTAT: CLKRDY (bit 0) set, unimplemented bit 3
+                            // clear -- what errata 19 step 5 checks for.
+                            shift_out = 8'h01;
                         else
                             shift_out = 8'hAA;  // wrong bank / wrong reg marker
                     end
@@ -68,6 +74,13 @@ module enc28j60_model (
                     // WCR (010aaaaa) data byte
                     if (opcode[7:5] == 3'b010 && opcode[4:0] == 5'h1F)
                         econ1 = shift_in;
+                    // BFC (101aaaaa) on ECON2: errata 19 step 1 clears PWRSV
+                    // before the system reset. A part left in Power Save mode
+                    // ignores SRC entirely, so this has to be accepted.
+                    if (opcode[7:5] == 3'b101 && opcode[4:0] == 5'h1E) begin
+                        econ2      = econ2 & ~shift_in;
+                        got_pwrsv_clr = 1'b1;
+                    end
                 end
                 byte_idx = byte_idx + 1;
             end
@@ -160,8 +173,18 @@ module tb_m1;
             errors = errors + 1;
         end
 
+        // Errata 19: a part in Power Save mode ignores the System Reset
+        // command outright, so PWRSV must be cleared BEFORE the reset. Without
+        // this the SRC can silently do nothing and every later register write
+        // lands on a part that was never reset -- which is what a JTAG
+        // reconfigure (FPGA restarts, ENC28J60 does not) walks straight into.
+        if (!model.got_pwrsv_clr) begin
+            $display("FAIL: ECON2.PWRSV was never cleared before the system reset");
+            errors = errors + 1;
+        end
+
         if (errors == 0)
-            $display("PASS: EREVID=0x%02h read correctly, LEDs correct", dut.erevid);
+            $display("PASS: EREVID=0x%02h read correctly, PWRSV cleared before SRC, LEDs correct", dut.erevid);
         else
             $display("%0d ERROR(S)", errors);
         $finish;

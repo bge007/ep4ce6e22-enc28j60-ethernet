@@ -24,7 +24,20 @@
 module oled_ssd1306 #(
     parameter integer CLK_HZ    = 50_000_000,
     parameter [6:0]   I2C_ADR   = 7'h3C,           // 0111100b; 0x3D if D/C# high
-    parameter integer POR_TICKS = 5_000_000        // 100 ms at 50 MHz
+    // Wait before touching the panel at all. Was 100 ms, raised to 500 ms
+    // after a cold-boot failure on real hardware (2026-08-27): on a power-up
+    // the panel's own POR runs at the same time as the FPGA's, and at 100 ms
+    // it is not yet ready -- it ACKs the init bytes on I2C but ignores them,
+    // leaving the display dark. Pressing RESET much later always worked
+    // because by then the panel had long since settled. A JTAG reconfigure
+    // never showed the fault either, for the same reason.
+    parameter integer POR_TICKS    = 25_000_000,   // 500 ms at 50 MHz
+    // ...and then do the whole init a second time, once, a second after boot.
+    // A fixed delay alone is a tuned guess about someone else's RC circuit;
+    // the retry makes a cold boot succeed even if the first attempt was still
+    // too early. Harmless when the first attempt already worked -- it just
+    // re-initialises and repaints.
+    parameter integer REINIT_TICKS = 50_000_000    // 1 s at 50 MHz
 ) (
     input  wire       clk,
     input  wire       rst,
@@ -158,6 +171,9 @@ module oled_ssd1306 #(
     reg [1:0]  cmd_i;
     reg        turn_on;      // this init pass sends 0xAF rather than the table
     reg        clear_pass;   // paint blanks, not text
+    reg        reinit_pending;  // one-shot cold-boot re-init, see REINIT_TICKS
+    reg        reinit_repaint;  // after that re-init, repaint text (not just clear)
+    reg [26:0] life_cnt;        // cycles since reset, saturating at REINIT_TICKS
 
     localparam [7:0] LOWER_COL = 8'h00;   // SSD1306: no RAM offset
 
@@ -187,8 +203,12 @@ module oled_ssd1306 #(
             ready      <= 1'b0;
             turn_on    <= 1'b0;
             clear_pass <= 1'b1;
+            reinit_pending <= 1'b1;
+            reinit_repaint <= 1'b0;
+            life_cnt       <= 27'd0;
             reset_walk;
         end else begin
+            if (life_cnt != REINIT_TICKS[26:0]) life_cnt <= life_cnt + 27'd1;
             case (st)
                 S_POR:
                     if (delay == POR_TICKS) begin
@@ -232,8 +252,24 @@ module oled_ssd1306 #(
                 S_AFTER_I:
                     if (!i2c_busy && !c_stop) begin
                         if (turn_on) begin
-                            ready <= 1'b1;
-                            st    <= S_IDLE;
+                            // Display-on has just been sent. On the normal
+                            // boot path the caller repaints on its next
+                            // change, so idling here is fine. After a
+                            // re-init it is NOT: the clear pass just blanked
+                            // the panel, and eth_top only issues a refresh
+                            // when something changes -- so nothing would ever
+                            // repaint and the display would sit blank. (That
+                            // is exactly what happened on hardware: text for
+                            // ~1 s, then the re-init blanked it for good.)
+                            // textbuf still holds the text, so paint it back.
+                            if (reinit_repaint) begin
+                                reinit_repaint <= 1'b0;
+                                reset_walk;
+                                st <= S_P_START;   // clear_pass is 0 -> paints text
+                            end else begin
+                                ready <= 1'b1;
+                                st    <= S_IDLE;
+                            end
                         end else begin
                             reset_walk;
                             st <= S_P_START;
@@ -245,6 +281,18 @@ module oled_ssd1306 #(
                         ready <= 1'b0;
                         reset_walk;
                         st <= S_P_START;
+                    end else if (reinit_pending && !i2c_busy &&
+                                 life_cnt == REINIT_TICKS[26:0]) begin
+                        // Cold-boot safety net: redo init -> clear -> display-on
+                        // once, now that the panel has certainly settled.
+                        reinit_pending <= 1'b0;
+                        reinit_repaint <= 1'b1;
+                        init_i         <= 5'd0;
+                        turn_on        <= 1'b0;
+                        clear_pass     <= 1'b1;
+                        ready          <= 1'b0;
+                        reset_walk;
+                        st             <= S_I_START;
                     end
 
                 S_P_START:
