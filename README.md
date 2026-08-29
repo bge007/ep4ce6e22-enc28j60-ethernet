@@ -10,7 +10,7 @@ payload, which is what 1,472-byte datagrams work out to once framing overhead
 is accounted for. See [docs/plan.md](docs/plan.md) for that arithmetic and the
 design rationale.
 
-> ### Status: M1–M3 confirmed on real hardware, M4 partly confirmed, M5 not started
+> ### Status: M1–M4 working on real hardware, M5 not started
 >
 > Both nodes have been flashed and tested on real EP4CE6E22 + ENC28J60
 > boards. `EREVID` reads back `0x06` on the LEDs and OLED, the serial console
@@ -38,8 +38,25 @@ design rationale.
 >   masked bits. `tb_m3`/`tb_m4` now assert that `RXEN` is never dropped
 >   outside an `RXRST` pulse, and that assertion fails against the old code.
 >
-> M4's receive half is confirmed on hardware: a UDP broadcast sent from a PC
-> appears on the node's OLED. Board-to-board messaging is next.
+> **M4 works: the headline demo runs.** A line typed on Host A's serial
+> console appears on Host B's OLED, and messaging is bidirectional — each
+> message increments only the receiving node's counter. Getting there needed
+> one more hardware-only fix, and it is the most instructive of the lot:
+>
+> - **A single SPI timing violation had been corrupting the MAC setup all
+>   along.** `TCSH`, the CS hold time, is 10 ns for ETH registers but **210 ns
+>   for MAC and MII registers**. This design raised CS one clock (20 ns) after
+>   the last byte, so ETH access worked perfectly while every MAC register
+>   write silently failed to commit. `MAADR` never held the MAC address, so
+>   each node answered broadcast ARP and dropped every unicast frame sent to
+>   it — which is exactly why board-to-board messaging could not work. It also
+>   explains the earlier bad-CRC transmissions (`MACON3.TXCRCEN` never took)
+>   and why MAC-register readback had been written off as unworkable silicon.
+>
+> A 15-minute soak with both nodes on the fixed build: 1,009 and 1,316 frames,
+> zero receive-chain corruptions on either, both still answering afterwards —
+> and with CS held correctly, the MAC configuration is finally the one the
+> design intends rather than the part's reset defaults.
 >
 > What's still open: the ENC28J60's own link LED hasn't been visually
 > confirmed, and the MAC-register (`MACON1`/`MACON3`) readback diagnostic was
@@ -354,7 +371,7 @@ and throughput that collapses under load.
 | M1.6 | Console — UART, buttons, typed message to OLED | Type in PowerShell, see it on the panel | Simulated ✓, hardware ✓ (Host A, byte-perfect round trip) |
 | M2 | Link up — RX/TX buffer, MAC filter, MAC config, MAC address, RXEN | Link LED on both boards | RXEN confirmed on hardware ✓ (Host A), link LED pending |
 | M3 | Ping — ARP responder (ICMP echo deferred to M4) | `ping` moves from "unreachable" to "timed out" | Simulated ✓, hardware ✓ (both nodes). Answering, but not yet *sustained* — see [docs/plan.md](docs/plan.md) |
-| M4 | UDP echo + **message display** | Host A sends `Hello World`, Host B shows it | Simulated ✓, receive half hardware ✓ (PC broadcast → OLED); board-to-board pending |
+| M4 | UDP echo + **message display** | Host A sends `Hello World`, Host B shows it | Simulated ✓, hardware ✓ (bidirectional, both nodes; needed the CS-hold-time fix above) |
 | M5 | Max speed — UDP blaster + measurement | ≥ 9.3 Mbit/s, loss-free | Not started |
 
 The headline demo — **`Hello World` typed on Host A appearing on Host B's
