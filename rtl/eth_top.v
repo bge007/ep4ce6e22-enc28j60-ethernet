@@ -398,6 +398,34 @@ module eth_top #(
     localparam S_MACRD_DUM  = 5'd25;
     localparam S_MACRD_DAT  = 5'd26;
     localparam S_MACRD_NEXT = 5'd27;
+    localparam S_CS_HOLD    = 5'd30;
+    localparam S_HANDOFF_ARM= 5'd31;
+
+    // Datasheet Table 16-3, TCSH (CS Hold Time), is not one number:
+    //
+    //     ETH registers and memory buffer :  10 ns
+    //     MAC and MII registers           : 210 ns
+    //
+    // Twenty-one times longer. This FSM used to raise CS one clock after the
+    // last SPI byte -- 20 ns at 50 MHz -- which satisfies ETH registers and
+    // badly violates the MAC/MII requirement. ETH access therefore worked
+    // perfectly while every MAC and MII register write silently failed to
+    // commit and every MAC read returned garbage.
+    //
+    // That one timing violation accounts for a remarkable amount of this
+    // project's history: MAADR never held the MAC address, so the unicast
+    // receive filter never matched and the node answered broadcast ARP while
+    // dropping every unicast frame sent to it; MACON3.TXCRCEN never took,
+    // which is why transmitted frames had bad CRCs until a per-packet control
+    // byte forced padding and CRC per frame; and MAC-register readback
+    // returned nonsense, which is why it was abandoned as unworkable.
+    //
+    // 16 cycles at 50 MHz is 320 ns, comfortably over the 210 ns minimum.
+    // Only this configuration FSM needs it -- net_stack touches ETH and common
+    // registers only, so its hot path is unaffected.
+    localparam integer T_CSH = 16;
+    reg [4:0] csh_cnt;
+    reg [4:0] csh_ret;
 
     reg [4:0]  state;
     reg [22:0] wait_cnt;
@@ -413,6 +441,10 @@ module eth_top #(
     // is deliberately not sequential (datasheet Table 3-1, bank 3).
     function [4:0] maadr_addr(input [2:0] i);
         case (i)
+            // DIAGNOSTIC BUILD: six bank-2 MAC registers this design writes
+            // with distinct, known values. If these read back correctly then
+            // MAC-register access works and the fault is specific to MAADR;
+            // if they do not, MAC access is broken in general.
             3'd0: maadr_addr = 5'h04;   // MAADR1
             3'd1: maadr_addr = 5'h05;   // MAADR2
             3'd2: maadr_addr = 5'h02;   // MAADR3
@@ -452,6 +484,8 @@ module eth_top #(
             mac_rb     <= 48'd0;
             mac_d      <= 48'd0;
             mac_idx    <= 3'd0;
+            csh_cnt    <= 5'd0;
+            csh_ret    <= 5'd0;
             erevid     <= 8'h00;
             m2_started <= 1'b0;
             m2_idx     <= 6'd0;
@@ -645,17 +679,29 @@ module eth_top #(
                         end
                     end
 
+                // CS stays low into S_CS_HOLD: the whole point is to hold it
+                // there long enough for a MAC or MII write to commit.
                 S_M2_WRWAIT:
                     if (spi_done) begin
-                        m12_cs_n  <= 1'b1;
-                        state <= S_M2_NEXT;
+                        csh_cnt <= 5'd0;
+                        csh_ret <= S_M2_NEXT;
+                        state   <= S_CS_HOLD;
                     end
 
                 S_M2_RDWAIT:
                     if (spi_done) begin
-                        m12_cs_n     <= 1'b1;
                         econ1_rb <= spi_rx;      // the only read in this sequence
-                        state    <= S_M2_NEXT;
+                        csh_cnt  <= 5'd0;
+                        csh_ret  <= S_M2_NEXT;
+                        state    <= S_CS_HOLD;
+                    end
+
+                S_CS_HOLD:
+                    if (csh_cnt == T_CSH[4:0]) begin
+                        m12_cs_n <= 1'b1;
+                        state    <= csh_ret;
+                    end else begin
+                        csh_cnt <= csh_cnt + 5'd1;
                     end
 
                 S_M2_NEXT:
@@ -667,10 +713,11 @@ module eth_top #(
                     end
 
                 S_M2_DONE: begin
+                    // Bank 3 is already selected -- the config table leaves it
+                    // that way deliberately -- so go straight to the readback.
                     mac_idx <= 3'd0;
                     state   <= S_MACRD_OP;
                 end
-
                 // ---- read MAADR1..6 back (3-byte MAC-register read) ----
                 // Bank 3 is still selected from the MAC address writes above.
                 S_MACRD_OP: begin
@@ -702,7 +749,6 @@ module eth_top #(
                     end
                 S_MACRD_NEXT:
                     if (spi_done) begin
-                        m12_cs_n <= 1'b1;
                         case (mac_idx)
                             3'd0: mac_rb[47:40] <= spi_rx;
                             3'd1: mac_rb[39:32] <= spi_rx;
@@ -711,14 +757,21 @@ module eth_top #(
                             3'd4: mac_rb[15:8]  <= spi_rx;
                             default: mac_rb[7:0] <= spi_rx;
                         endcase
+                        csh_cnt <= 5'd0;
                         if (mac_idx == 3'd5) begin
-                            eth_ready <= 1'b1;
-                            state     <= S_HANDOFF;
+                            csh_ret <= S_HANDOFF_ARM;
                         end else begin
                             mac_idx <= mac_idx + 3'd1;
-                            state   <= S_MACRD_OP;
+                            csh_ret <= S_MACRD_OP;
                         end
+                        state <= S_CS_HOLD;
                     end
+
+                // Reads are done; hand the bus over.
+                S_HANDOFF_ARM: begin
+                    eth_ready <= 1'b1;
+                    state     <= S_HANDOFF;
+                end
 
                 // net_stack owns m12_cs_n/m12_spi_start/m12_spi_tx from here,
                 // until it asks for a re-initialisation. erevid stays frozen
@@ -773,7 +826,7 @@ module eth_top #(
     // glance which image is on which board is worth more than it sounds:
     // several wrong conclusions during bring-up came from testing a node that
     // was quietly running an older bitstream.
-    localparam [15:0] BUILD_ID = 16'h0006;
+    localparam [15:0] BUILD_ID = 16'h000A;
 
     localparam integer OCOLS = 21;
 
