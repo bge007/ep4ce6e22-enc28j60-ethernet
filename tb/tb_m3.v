@@ -142,6 +142,7 @@ module tb_m3;
     always #10 clk = ~clk;
     reg rst = 1;
     reg start = 0;
+    reg force_reinit = 0;   // KEY3 on hardware; pulsed by scenario 5
 
     wire cs_n, spi_start, sck, mosi, miso;
     wire [7:0] spi_tx, spi_rx;
@@ -165,7 +166,8 @@ module tb_m3;
         .frames_seen(frames_seen), .arp_replies_sent(arp_replies_sent),
         .last_eir(last_eir), .last_estat(last_estat),
         .arp_reqs(), .last_etype(),
-        .rx_resyncs(), .tsv_count(), .tsv_wire(), .tsv_stat2(), .tsv_stat3()
+        .rx_resyncs(), .tsv_count(), .tsv_wire(), .tsv_stat2(), .tsv_stat3(),
+        .force_reinit(force_reinit)
     );
 
     // spi_master itself has no chip-select notion (matching eth_top.v's
@@ -381,6 +383,33 @@ module tb_m3;
         check(dut.next_rdpt == NEXT_PTR,
               "next_rdpt not tracking again after the re-initialisation");
 
+        // ------------------------------------------------------------------
+        // Scenario 5: KEY3 forces a re-initialisation on demand.
+        // ------------------------------------------------------------------
+        // Real chain corruption stopped happening once the CS-hold and SPI
+        // phase faults were fixed -- good, but it left the recovery path with
+        // no way to run on hardware. This trigger gives it one. The request
+        // must be taken from the idle poll, never mid-frame, and the node must
+        // serve ARP again afterwards exactly as in scenario 4.
+        @(posedge clk) force_reinit = 1'b1;
+        @(posedge clk) force_reinit = 1'b0;
+
+        wait (dut.reinit_req == 1'b1);
+        check(dut.rx_resyncs == 16'd2, "forced re-init not counted");
+        check(dut.cs_n == 1'b1, "net_stack still driving CS after asking for re-init");
+
+        start = 1'b0;               // eth_top takes the bus, re-runs bring-up
+        #20_000;
+        model.pktcnt  = 8'd0;
+        model.cur_ptr = 16'h0000;
+        start = 1'b1;
+
+        inject_arp_request(OUR_IP, NEXT_PTR, 16'h0000);
+        wait (frames_seen == 16'd6);
+        #10_000;
+        check(arp_replies_sent == 16'd4,
+              "no ARP reply after the forced re-initialisation");
+
         // RXEN must have survived every bank select, TX sequence and
         // cleanup above. It did not before ECON1 moved to BFS/BFC:
         // each whole-byte bank select switched the receiver off.
@@ -388,7 +417,7 @@ module tb_m3;
               "RXEN was cleared outside an RXRST pulse (bank select clobbered ECON1)");
 
         if (errors == 0)
-            $display("PASS: ARP reply byte-correct, ERXRDPT/EPKTCNT/ETXND/TXRTS all correct, RXEN never dropped, non-matching IP ignored, poisoned next-pointer survived, corrupt chain triggers a full re-init and recovers");
+            $display("PASS: ARP reply byte-correct, ERXRDPT/EPKTCNT/ETXND/TXRTS all correct, RXEN never dropped, non-matching IP ignored, poisoned next-pointer survived, corrupt chain and KEY3 both trigger a full re-init and recover");
         else
             $display("%0d ERROR(S)", errors);
         $finish;

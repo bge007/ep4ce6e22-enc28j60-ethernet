@@ -88,6 +88,9 @@ module eth_top #(
     // send_req) needs this before uart_console (which actually drives it,
     // via msg_updated) is instantiated further down.
     wire       msg_updated;
+    // Declared here rather than beside the debouncer below: net_stack is
+    // instantiated further up and takes key_rise[3] as its re-init trigger.
+    wire [3:0] keys, key_rise, key_fall;
 
     // ------------------------------------------------------------------
     // SPI master (12.5 MHz for bring-up; final design moves to 20 MHz)
@@ -155,6 +158,10 @@ module eth_top #(
         .rx_resyncs(eth_rx_resyncs),
         .polls(eth_polls), .last_pktcnt(eth_pktcnt), .msgs_rx(eth_msgs_rx),
         .reinit_req(net_reinit_req),
+        // KEY3 forces a re-initialisation, so the recovery path can be proven
+        // on hardware. Safe to press at any time: the request is taken from
+        // the idle poll, never mid-frame, and counts on the console as X=.
+        .force_reinit(key_rise[3]),
         .tsv_count(eth_tsv_count), .tsv_wire(eth_tsv_wire),
         .tsv_stat2(eth_tsv_s2), .tsv_stat3(eth_tsv_s3)
     );
@@ -826,7 +833,7 @@ module eth_top #(
     // glance which image is on which board is worth more than it sounds:
     // several wrong conclusions during bring-up came from testing a node that
     // was quietly running an older bitstream.
-    localparam [15:0] BUILD_ID = 16'h000A;
+    localparam [15:0] BUILD_ID = 16'h000B;
 
     localparam integer OCOLS = 21;
 
@@ -868,7 +875,6 @@ module eth_top #(
     // key[0..3] are the four user buttons. nrst (PIN_88, the RESET button) is
     // the design's reset, so it cannot also be read as a user button.
     // ------------------------------------------------------------------
-    wire [3:0] keys, key_rise, key_fall;
 
     debounce #(.N(4), .CLK_HZ(50_000_000), .STABLE_MS(10)) u_deb (
         .clk(clk), .rst(rst),

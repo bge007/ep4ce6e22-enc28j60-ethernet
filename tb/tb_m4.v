@@ -173,6 +173,7 @@ module tb_m4;
         .cs_n(cs_n), .spi_start(spi_start), .spi_tx(spi_tx),
         .spi_rx(spi_rx), .spi_busy(spi_busy),
         .tx_rd_addr(tx_rd_addr), .tx_rd_data(tx_rd_data), .send_req(send_req),
+        .force_reinit(1'b0),
         .rx_rd_addr(rx_rd_addr_dut), .rx_rd_data(rx_rd_data), .rx_updated(rx_updated),
         .frames_seen(frames_seen), .arp_replies_sent(arp_replies_sent),
         .last_eir(last_eir), .last_estat(last_estat),

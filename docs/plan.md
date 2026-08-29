@@ -310,6 +310,21 @@ counter:
 | A → B | 1 | 5 |
 | A → B, after the 15-minute soak | 1 | 6 |
 
+### Proving the recovery path on hardware
+
+The full re-init recovery has never fired on real silicon: `X` has stayed at 0
+through every soak since the CS-hold and SPI-phase faults were fixed. That is
+the outcome we wanted, but it leaves a recovery path that has only ever run in
+a testbench — which is not a recovery path anyone should rely on.
+
+**KEY3 now forces one.** The request is latched wherever it arrives and acted
+on from the idle poll, so it can never interrupt a frame mid-flight, and it
+counts on the console as `X=` alongside genuine corruption. Pressing it at any
+time is safe by design; if it is not, that is exactly what the test is for.
+
+`tb_m3` scenario 5 exercises the same trigger in simulation and checks the node
+serves ARP again afterwards.
+
 ## Next steps, in order
 
 1. Re-run the full ENC28J60 init (errata-19 reset + M2 config) as the recovery

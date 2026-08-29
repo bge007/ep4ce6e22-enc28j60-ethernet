@@ -97,6 +97,13 @@ module net_stack #(
     // sequence and the M2 configuration, then hands the bus back -- at which
     // point `start` rises again and the FSM below restarts from S_INIT0.
     output reg          reinit_req,
+    // Deliberate fault injection, so the recovery path can be exercised on
+    // real silicon instead of only in simulation. Real chain corruption has
+    // not recurred since the CS-hold and SPI-phase fixes -- which is the
+    // outcome we wanted, but it also means the recovery that was written for
+    // it had never actually run on hardware. A recovery path that has only
+    // ever executed in a testbench is not a recovery path you can rely on.
+    input  wire         force_reinit,
     // Liveness diagnostics. "Counters frozen" on the console is ambiguous:
     // it means the FSM is stuck OR the part is reporting no packets, and
     // those need completely different fixes. polls increments once per
@@ -335,6 +342,7 @@ module net_stack #(
     // which walks through all 256 values as packets march up the buffer. Two
     // chances in 256 per frame; nodes wedged after 122, 156 and 134 frames
     // against a predicted mean of 128.
+    reg        force_pending;       // a forced re-init is queued
     reg        op_ph2;              // 0 = opcode sent next, 1 = data byte next
     reg [4:0]  bf_addr;             // generic BFS/BFC target
     reg [7:0]  bf_mask;
@@ -500,7 +508,8 @@ module net_stack #(
         // send actually starts (S_MSG_TXBANK below). A later assignment in
         // the same always block (the rst clear, or that clear-on-start)
         // wins over this tentative one for the same clock edge.
-        if (send_req) send_pending <= 1'b1;
+        if (send_req)     send_pending  <= 1'b1;
+        if (force_reinit) force_pending <= 1'b1;
 
         if (rst) begin
             state            <= S_INIT0;
@@ -520,6 +529,7 @@ module net_stack #(
             last_etype       <= 16'd0;
             rx_resyncs       <= 16'd0;
             reinit_req       <= 1'b0;
+            force_pending    <= 1'b0;
             tsv_count        <= 16'd0;
             tsv_wire         <= 16'd0;
             tsv_stat2        <= 8'd0;
@@ -567,10 +577,16 @@ module net_stack #(
                     last_pktcnt <= spi_rx;
                     if (spi_rx == 8'h00) begin
                         wait_cnt <= 0;
-                        // Nothing waiting to receive -- if a typed line is
-                        // queued to go out (M4), send it now; otherwise poll
-                        // again.
-                        state <= send_pending ? S_MSGBANK : S_POLL;
+                        // Nothing waiting to receive. A forced re-init is
+                        // taken here, from idle, so it can never interrupt a
+                        // frame mid-flight; otherwise send a queued line
+                        // (M4), otherwise just poll again.
+                        if (force_pending) begin
+                            force_pending <= 1'b0;
+                            rx_resyncs    <= rx_resyncs + 16'd1;
+                            state         <= S_REINIT_REQ;
+                        end else
+                            state <= send_pending ? S_MSGBANK : S_POLL;
                     end else begin
                         state <= S_SETRDPT0;
                     end
