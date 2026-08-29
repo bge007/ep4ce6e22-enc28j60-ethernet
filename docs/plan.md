@@ -351,6 +351,27 @@ cheap. `IDLE_LIMIT` is a parameter purely so `tb_m3` can shorten it — scenario
 stalls the model and checks recovery, verified to fail with the watchdog
 disabled.
 
+### The watchdog, proven on hardware
+
+Creating 30 s of genuine silence on a live LAN is awkward: broadcast traffic
+arrives every second or so. `pc/blackout-test.ps1` does it by shutting the
+node's switch port over SSH, so nothing has to be unplugged, and it always
+restores the port in a `finally` block.
+
+```
+baseline          : F=113  A=80  X=9
+  >>> port shut
+during blackout   : F=113  A=80  X=11     frames frozen, X rose by 2
+  >>> port restored
+after restore     : F=119  A=85  X=12     frames resumed
+```
+
+Two re-initialisations across a 60-second blackout is exactly the ~30 s period,
+and the node resumed receiving as soon as the link came back. Between this, the
+KEY3 trigger and the 542 re-inits Host A performed against genuine chain
+corruption, all three paths into the recovery are now exercised on real
+silicon rather than only in simulation.
+
 ## Next steps, in order
 
 1. Re-run the full ENC28J60 init (errata-19 reset + M2 config) as the recovery
