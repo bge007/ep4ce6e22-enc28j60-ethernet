@@ -33,7 +33,11 @@
 module net_stack #(
     parameter [7:0]  HOST_ID = 8'd1,                     // 1 or 2; picks the peer
     parameter [47:0] OUR_MAC = 48'h02_42_CE_60_00_01,   // 02:42:CE:60:00:01
-    parameter [31:0] OUR_IP  = 32'hC0_A8_01_3C          // 192.168.1.60
+    parameter [31:0] OUR_IP  = 32'hC0_A8_01_3C,         // 192.168.1.60
+    // Receive-stall watchdog period. A parameter, not a constant, purely so a
+    // testbench can shorten it -- 30 s of silence is 1.5 billion cycles, which
+    // no simulation is going to sit through.
+    parameter [30:0] IDLE_LIMIT = 31'd1_500_000_000     // 30 s at 50 MHz
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -343,6 +347,20 @@ module net_stack #(
     // chances in 256 per frame; nodes wedged after 122, 156 and 134 frames
     // against a predicted mean of 128.
     reg        force_pending;       // a forced re-init is queued
+    // Receive-stall watchdog. The chain-corruption check can only fire from
+    // cleanup, which is reached by *processing a frame*. It is therefore blind
+    // to the failure where the part simply stops handing frames over: EPKTCNT
+    // reads 0 for ever, no frame is processed, cleanup is never reached, and
+    // nothing asks for recovery. Observed on hardware -- the poll counter kept
+    // advancing while frames, ARP and the resync count all sat frozen, and the
+    // node stayed dead indefinitely with a perfectly healthy state machine.
+    //
+    // So watch the silence instead. This LAN delivers broadcast traffic every
+    // second or so, and any node that has gone ~30 s without a single frame
+    // has stopped receiving rather than found a quiet network. A needless
+    // re-init costs about 15 ms, so erring towards firing is cheap; missing a
+    // stall costs the node until someone notices.
+    reg [30:0] idle_cnt;
     reg        op_ph2;              // 0 = opcode sent next, 1 = data byte next
     reg [4:0]  bf_addr;             // generic BFS/BFC target
     reg [7:0]  bf_mask;
@@ -510,6 +528,10 @@ module net_stack #(
         // wins over this tentative one for the same clock edge.
         if (send_req)     send_pending  <= 1'b1;
         if (force_reinit) force_pending <= 1'b1;
+        // Tentative, like the latches above: a later assignment in this same
+        // block (the reset, or the clear when a frame is processed) wins for
+        // the same clock edge.
+        if (idle_cnt < IDLE_LIMIT) idle_cnt <= idle_cnt + 31'd1;
 
         if (rst) begin
             state            <= S_INIT0;
@@ -530,6 +552,7 @@ module net_stack #(
             rx_resyncs       <= 16'd0;
             reinit_req       <= 1'b0;
             force_pending    <= 1'b0;
+            idle_cnt         <= 31'd0;
             tsv_count        <= 16'd0;
             tsv_wire         <= 16'd0;
             tsv_stat2        <= 8'd0;
@@ -581,8 +604,9 @@ module net_stack #(
                         // taken here, from idle, so it can never interrupt a
                         // frame mid-flight; otherwise send a queued line
                         // (M4), otherwise just poll again.
-                        if (force_pending) begin
+                        if (force_pending || idle_cnt >= IDLE_LIMIT) begin
                             force_pending <= 1'b0;
+                            idle_cnt      <= 31'd0;
                             rx_resyncs    <= rx_resyncs + 16'd1;
                             state         <= S_REINIT_REQ;
                         end else
@@ -1022,6 +1046,7 @@ module net_stack #(
                 // already does exactly "select bank 1, then go poll" -- reuse
                 // it here instead of adding a new state just to repeat it.
                 S_CLEANUP4: begin
+                    idle_cnt    <= 31'd0;     // a frame arrived: not stalled
                     next_rdpt   <= next_ptr_ok ? cur_next_ptr : ERXST;
                     if (!next_ptr_ok) rx_resyncs <= rx_resyncs + 16'd1;
                     frames_seen <= frames_seen + 16'd1;

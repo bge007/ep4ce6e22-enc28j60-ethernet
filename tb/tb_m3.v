@@ -143,6 +143,7 @@ module tb_m3;
     reg rst = 1;
     reg start = 0;
     reg force_reinit = 0;   // KEY3 on hardware; pulsed by scenario 5
+    reg [15:0] resyncs_before;
 
     wire cs_n, spi_start, sck, mosi, miso;
     wire [7:0] spi_tx, spi_rx;
@@ -159,7 +160,9 @@ module tb_m3;
 
     wire [7:0] last_eir, last_estat;   // TX diagnostic readback, unused in this tb
 
-    net_stack #(.OUR_MAC(OUR_MAC), .OUR_IP(OUR_IP)) dut (
+    // 10 ms of silence rather than 30 s, so the watchdog is reachable in
+    // simulation. Every scenario above feeds a frame well inside that.
+    net_stack #(.OUR_MAC(OUR_MAC), .OUR_IP(OUR_IP), .IDLE_LIMIT(31'd500_000)) dut (
         .clk(clk), .rst(rst), .start(start),
         .cs_n(cs_n), .spi_start(spi_start), .spi_tx(spi_tx),
         .spi_rx(spi_rx), .spi_busy(spi_busy),
@@ -410,6 +413,31 @@ module tb_m3;
         check(arp_replies_sent == 16'd4,
               "no ARP reply after the forced re-initialisation");
 
+        // ------------------------------------------------------------------
+        // Scenario 6: a receiver that goes silent must recover itself.
+        // ------------------------------------------------------------------
+        // The chain-corruption check only runs from cleanup, which is reached
+        // by processing a frame -- so it cannot see the failure where the part
+        // stops handing frames over at all. That was observed on hardware: the
+        // poll counter kept advancing while frames, ARP and the resync count
+        // sat frozen, and the node stayed dead indefinitely with a perfectly
+        // healthy state machine. Silence has to be its own trigger.
+        resyncs_before = dut.rx_resyncs;
+        #12_000_000;                       // 12 ms with no frame injected
+        check(dut.rx_resyncs > resyncs_before,
+              "watchdog did not fire after a receive stall");
+        wait (dut.reinit_req == 1'b1);
+
+        start = 1'b0;
+        #20_000;
+        model.pktcnt  = 8'd0;
+        model.cur_ptr = 16'h0000;
+        start = 1'b1;
+
+        inject_arp_request(OUR_IP, NEXT_PTR, 16'h0000);
+        wait (arp_replies_sent == 16'd5);
+        check(1'b1, "");
+
         // RXEN must have survived every bank select, TX sequence and
         // cleanup above. It did not before ECON1 moved to BFS/BFC:
         // each whole-byte bank select switched the receiver off.
@@ -417,7 +445,7 @@ module tb_m3;
               "RXEN was cleared outside an RXRST pulse (bank select clobbered ECON1)");
 
         if (errors == 0)
-            $display("PASS: ARP reply byte-correct, ERXRDPT/EPKTCNT/ETXND/TXRTS all correct, RXEN never dropped, non-matching IP ignored, poisoned next-pointer survived, corrupt chain and KEY3 both trigger a full re-init and recover");
+            $display("PASS: ARP reply byte-correct, ERXRDPT/EPKTCNT/ETXND/TXRTS all correct, RXEN never dropped, non-matching IP ignored, poisoned next-pointer survived, corrupt chain, KEY3 and a receive stall all trigger a full re-init and recover");
         else
             $display("%0d ERROR(S)", errors);
         $finish;

@@ -833,7 +833,7 @@ module eth_top #(
     // glance which image is on which board is worth more than it sounds:
     // several wrong conclusions during bring-up came from testing a node that
     // was quietly running an older bitstream.
-    localparam [15:0] BUILD_ID = 16'h000B;
+    localparam [15:0] BUILD_ID = 16'h000C;
 
     localparam integer OCOLS = 21;
 

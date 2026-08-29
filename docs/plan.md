@@ -325,6 +325,32 @@ time is safe by design; if it is not, that is exactly what the test is for.
 `tb_m3` scenario 5 exercises the same trigger in simulation and checks the node
 serves ARP again afterwards.
 
+### The recovery fired on hardware -- and exposed a second stall it was blind to
+
+Pressing KEY3 proved the path works on real silicon. Host A subsequently
+performed **542** re-initialisations and kept serving ARP throughout, frames and
+ARP counters advancing the whole time. The recovery works.
+
+It also revealed a failure it could not see. Host B wedged with:
+
+```
+F=0A73  A=068D  X=0021  frozen        <- frames, ARP and re-inits all stopped
+P=4D51 -> 5BF2  advancing             <- the state machine is perfectly healthy
+```
+
+The chain-corruption check only runs from cleanup, and cleanup is reached by
+*processing a frame*. When the part simply stops handing frames over, EPKTCNT
+reads 0 for ever, no frame is processed, cleanup never runs, and nothing asks
+for recovery. The node cannot detect its own silence.
+
+**Fix: silence is now its own trigger.** A watchdog requests a re-init after
+~30 s without a single frame. This LAN delivers broadcast traffic every second
+or so, so a node that quiet has stopped receiving rather than found a quiet
+network; a needless re-init costs about 15 ms, so erring towards firing is
+cheap. `IDLE_LIMIT` is a parameter purely so `tb_m3` can shorten it — scenario 6
+stalls the model and checks recovery, verified to fail with the watchdog
+disabled.
+
 ## Next steps, in order
 
 1. Re-run the full ENC28J60 init (errata-19 reset + M2 config) as the recovery
