@@ -284,6 +284,32 @@ The switch learns both on their documented ports -- `0242.ce60.0001` on
 Gi1/0/13 and `0242.ce60.0002` on Gi1/0/17 -- with every error counter at zero.
 M3 is now stable on both nodes, which unblocks board-to-board M4.
 
+### Both nodes on build 000A, with the MAC config actually live
+
+The CS-hold fix means `MACON3`, `MABBIPG`, `MAIPGL/H` and `MAMXFL` take effect
+for the first time — until now the part ran on reset defaults — so this soak
+also re-qualifies the MAC configuration itself.
+
+| | Host A | Host B |
+|---|---|---|
+| frames (15 min) | 1,009 | 1,316 |
+| ARP requests parsed | 408 | 651 |
+| replies sent | 27 | 28 |
+| chain corruptions | **0** | **0** |
+| longest stall | 5 s | 4 s |
+| reachable after | yes | yes |
+
+Messaging is bidirectional and each message increments only the receiver's
+counter:
+
+| | Host A `M=` | Host B `M=` |
+|---|---|---|
+| baseline | 0 | 3 |
+| A → B | 0 | 4 |
+| B → A | 1 | 4 |
+| A → B | 1 | 5 |
+| A → B, after the 15-minute soak | 1 | 6 |
+
 ## Next steps, in order
 
 1. Re-run the full ENC28J60 init (errata-19 reset + M2 config) as the recovery
