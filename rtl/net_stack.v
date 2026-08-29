@@ -103,6 +103,12 @@ module net_stack #(
     // EPKTCNT poll, so it separates the two -- if it advances the FSM is
     // alive and the part simply has nothing to hand over. last_pktcnt is
     // whatever that poll actually read back.
+    // Messages accepted from the peer. rx_updated is a one-cycle pulse, so
+    // there was no way to tell from the console whether a UDP message had
+    // been received and stored or merely a frame had gone by -- only the OLED
+    // showed it, which makes board-to-board messaging untestable without eyes
+    // on the panel.
+    output reg  [15:0]  msgs_rx,
     output reg  [15:0]  polls,
     output reg  [7:0]   last_pktcnt,
     output reg  [15:0]  tsv_count,
@@ -501,6 +507,7 @@ module net_stack #(
             cs_n             <= 1'b1;
             next_rdpt        <= ERXST;
             op_ph2           <= 1'b0;
+            msgs_rx          <= 16'd0;
             polls            <= 16'd0;
             last_pktcnt      <= 8'd0;
             wait_cnt         <= 0;
@@ -739,8 +746,10 @@ module net_stack #(
                     // only ever reaches 1 once its own check actually passed
                     // (see the S_RBM_BOD_WT walk), so an aborted frame always
                     // leaves at least one of these still 0.
-                    if (is_ip && is_udp && dest_ip_is_us && is_our_port)
+                    if (is_ip && is_udp && dest_ip_is_us && is_our_port) begin
                         rx_updated <= 1'b1;
+                        msgs_rx    <= msgs_rx + 16'd1;
+                    end
                     // Telemetry: did we parse this as an ARP request at all,
                     // regardless of whether its target IP matched us?
                     if (is_arp && is_request)

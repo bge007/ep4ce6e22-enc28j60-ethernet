@@ -70,6 +70,9 @@ module uart_console #(
     input  wire [15:0] net_etype,    // EtherType of the last frame walked
     input  wire [15:0] net_resyncs,  // RX pointer-chain rebuilds
     input  wire [15:0] build_id,     // bitstream identity, echoed on the ID line
+    input  wire [47:0] mac_rb,       // MAADR1..6, 3rd byte of each read
+    input  wire [47:0] mac_d,        // ... 2nd byte, the datasheet dummy slot
+    input  wire [15:0] net_msgs,     // UDP messages accepted from the peer
     input  wire [15:0] net_polls,    // EPKTCNT polls completed (liveness)
     input  wire [7:0]  net_pktcnt,   // EPKTCNT value the last poll read
     input  wire [15:0] net_tsvcount, // transmit status vector: byte count
@@ -130,14 +133,14 @@ module uart_console #(
     localparam integer OLED_RDY_N = 12;   // "OLED READY\r\n"
     localparam integer OLED_ERR_N = 15;   // "OLED I2C NACK\r\n"
     localparam integer ETH_N      = 11;   // "ETH C1=xx\r\n"
-    localparam integer NET_N      = 62;   // "NET F=... R=... E=.. S=.. A=... T=... X=... P=xxxx K=xx\r\n"
+    localparam integer NET_N      = 69;   // "NET F=... R=... E=.. S=.. A=... T=... X=... P=xxxx K=xx M=xxxx\r\n"
 
     localparam integer TSV_N      = 31;   // TSV n=xxxx w=xxxx s2=xx s3=xx + CRLF
     // "ID HOST=A BLD=xxxx\r\n" -- emitted every ~2.7 s so a tool can identify
     // the board by listening alone: no reset (which would lose the run's
     // state), no keystroke (which would collide with the typed-message
     // feature), and no dependence on catching the power-on banner.
-    localparam integer ID_N       = 20;
+    localparam integer ID_N       = 52;   // + " MAC=xxxxxxxxxxxx D=xxxxxxxxxxxx"
 
     function [7:0] hexdig(input [3:0] n);
         hexdig = (n < 4'd10) ? (8'h30 + n) : (8'h41 + n - 4'd10);
@@ -161,7 +164,11 @@ module uart_console #(
         id_msg[ 9]=" ";
         id_msg[10]="B"; id_msg[11]="L"; id_msg[12]="D"; id_msg[13]="=";
         id_msg[14]="?"; id_msg[15]="?"; id_msg[16]="?"; id_msg[17]="?";
-        id_msg[18]=8'h0D; id_msg[19]=8'h0A;
+        id_msg[18]=" ";
+        id_msg[19]="M"; id_msg[20]="A"; id_msg[21]="C"; id_msg[22]="=";
+        id_msg[35]=" ";
+        id_msg[36]="D"; id_msg[37]="=";
+        id_msg[50]=8'h0D; id_msg[51]=8'h0A;
     end
 
     reg [7:0] oled_rdy_msg [0:OLED_RDY_N-1];
@@ -178,7 +185,7 @@ module uart_console #(
     end
 
     reg [3:0] cur;
-    reg [5:0] sidx;
+    reg [6:0] sidx;
     reg       req_banner, req_keys, req_echo, req_oled_rdy, req_oled_err, req_eth, req_net;
     reg       req_id;
     reg [2:0] id_div;      // divides the heartbeat down to roughly 2.7 s
@@ -194,15 +201,17 @@ module uart_console #(
     always @(posedge clk) hb_cnt <= hb_cnt + 24'd1;
     reg        req_tsv;
 
-    wire [5:0] cur_len = (cur == T_BANNER)   ? BANNER_N[5:0]   :
-                         (cur == T_KEYS)     ? KEYS_N[5:0]     :
-                         (cur == T_OLED_RDY) ? OLED_RDY_N[5:0] :
-                         (cur == T_OLED_ERR) ? OLED_ERR_N[5:0] :
-                         (cur == T_ETH)      ? ETH_N[5:0]      :
-                         (cur == T_NET)      ? NET_N[5:0]      :
-                         (cur == T_TSV)      ? TSV_N[5:0]      :
-                         (cur == T_ID)       ? ID_N[5:0]       :
-                                               ECHO_N[5:0];
+    // 7 bits, not 6: the NET line is 69 characters once the message counter
+    // is on it, and a 6-bit index silently wrapped at 64.
+    wire [6:0] cur_len = (cur == T_BANNER)   ? BANNER_N[6:0]   :
+                         (cur == T_KEYS)     ? KEYS_N[6:0]     :
+                         (cur == T_OLED_RDY) ? OLED_RDY_N[6:0] :
+                         (cur == T_OLED_ERR) ? OLED_ERR_N[6:0] :
+                         (cur == T_ETH)      ? ETH_N[6:0]      :
+                         (cur == T_NET)      ? NET_N[6:0]      :
+                         (cur == T_TSV)      ? TSV_N[6:0]      :
+                         (cur == T_ID)       ? ID_N[6:0]       :
+                                               ECHO_N[6:0];
 
     // "ETH C1=xx\r\n" -- ECON1 readback as hex.
     reg [7:0] eth_byte;
@@ -241,57 +250,64 @@ module uart_console #(
             6'd7:  net_byte = hexdig(net_frames[11:8]);
             6'd8:  net_byte = hexdig(net_frames[7:4]);
             6'd9:  net_byte = hexdig(net_frames[3:0]);
-            6'd10: net_byte = " ";
-            6'd11: net_byte = "R";
-            6'd12: net_byte = "=";
-            6'd13: net_byte = hexdig(net_replies[15:12]);
-            6'd14: net_byte = hexdig(net_replies[11:8]);
-            6'd15: net_byte = hexdig(net_replies[7:4]);
-            6'd16: net_byte = hexdig(net_replies[3:0]);
-            6'd17: net_byte = " ";
-            6'd18: net_byte = "E";
-            6'd19: net_byte = "=";
-            6'd20: net_byte = hexdig(net_eir[7:4]);
-            6'd21: net_byte = hexdig(net_eir[3:0]);
-            6'd22: net_byte = " ";
-            6'd23: net_byte = "S";
-            6'd24: net_byte = "=";
-            6'd25: net_byte = hexdig(net_estat[7:4]);
-            6'd26: net_byte = hexdig(net_estat[3:0]);
-            6'd27: net_byte = " ";
-            6'd28: net_byte = "A";
-            6'd29: net_byte = "=";
-            6'd30: net_byte = hexdig(net_arpreqs[15:12]);
-            6'd31: net_byte = hexdig(net_arpreqs[11:8]);
-            6'd32: net_byte = hexdig(net_arpreqs[7:4]);
-            6'd33: net_byte = hexdig(net_arpreqs[3:0]);
-            6'd34: net_byte = " ";
-            6'd35: net_byte = "T";
-            6'd36: net_byte = "=";
-            6'd37: net_byte = hexdig(net_etype[15:12]);
-            6'd38: net_byte = hexdig(net_etype[11:8]);
-            6'd39: net_byte = hexdig(net_etype[7:4]);
-            6'd40: net_byte = hexdig(net_etype[3:0]);
-            6'd41: net_byte = " ";
-            6'd42: net_byte = "X";
-            6'd43: net_byte = "=";
-            6'd44: net_byte = hexdig(net_resyncs[15:12]);
-            6'd45: net_byte = hexdig(net_resyncs[11:8]);
-            6'd46: net_byte = hexdig(net_resyncs[7:4]);
-            6'd47: net_byte = hexdig(net_resyncs[3:0]);
-            6'd48: net_byte = " ";
-            6'd49: net_byte = "P";
-            6'd50: net_byte = "=";
-            6'd51: net_byte = hexdig(net_polls[15:12]);
-            6'd52: net_byte = hexdig(net_polls[11:8]);
-            6'd53: net_byte = hexdig(net_polls[7:4]);
-            6'd54: net_byte = hexdig(net_polls[3:0]);
-            6'd55: net_byte = " ";
-            6'd56: net_byte = "K";
-            6'd57: net_byte = "=";
-            6'd58: net_byte = hexdig(net_pktcnt[7:4]);
-            6'd59: net_byte = hexdig(net_pktcnt[3:0]);
-            6'd60: net_byte = 8'h0D;
+            7'd10: net_byte = " ";
+            7'd11: net_byte = "R";
+            7'd12: net_byte = "=";
+            7'd13: net_byte = hexdig(net_replies[15:12]);
+            7'd14: net_byte = hexdig(net_replies[11:8]);
+            7'd15: net_byte = hexdig(net_replies[7:4]);
+            7'd16: net_byte = hexdig(net_replies[3:0]);
+            7'd17: net_byte = " ";
+            7'd18: net_byte = "E";
+            7'd19: net_byte = "=";
+            7'd20: net_byte = hexdig(net_eir[7:4]);
+            7'd21: net_byte = hexdig(net_eir[3:0]);
+            7'd22: net_byte = " ";
+            7'd23: net_byte = "S";
+            7'd24: net_byte = "=";
+            7'd25: net_byte = hexdig(net_estat[7:4]);
+            7'd26: net_byte = hexdig(net_estat[3:0]);
+            7'd27: net_byte = " ";
+            7'd28: net_byte = "A";
+            7'd29: net_byte = "=";
+            7'd30: net_byte = hexdig(net_arpreqs[15:12]);
+            7'd31: net_byte = hexdig(net_arpreqs[11:8]);
+            7'd32: net_byte = hexdig(net_arpreqs[7:4]);
+            7'd33: net_byte = hexdig(net_arpreqs[3:0]);
+            7'd34: net_byte = " ";
+            7'd35: net_byte = "T";
+            7'd36: net_byte = "=";
+            7'd37: net_byte = hexdig(net_etype[15:12]);
+            7'd38: net_byte = hexdig(net_etype[11:8]);
+            7'd39: net_byte = hexdig(net_etype[7:4]);
+            7'd40: net_byte = hexdig(net_etype[3:0]);
+            7'd41: net_byte = " ";
+            7'd42: net_byte = "X";
+            7'd43: net_byte = "=";
+            7'd44: net_byte = hexdig(net_resyncs[15:12]);
+            7'd45: net_byte = hexdig(net_resyncs[11:8]);
+            7'd46: net_byte = hexdig(net_resyncs[7:4]);
+            7'd47: net_byte = hexdig(net_resyncs[3:0]);
+            7'd48: net_byte = " ";
+            7'd49: net_byte = "P";
+            7'd50: net_byte = "=";
+            7'd51: net_byte = hexdig(net_polls[15:12]);
+            7'd52: net_byte = hexdig(net_polls[11:8]);
+            7'd53: net_byte = hexdig(net_polls[7:4]);
+            7'd54: net_byte = hexdig(net_polls[3:0]);
+            7'd55: net_byte = " ";
+            7'd56: net_byte = "K";
+            7'd57: net_byte = "=";
+            7'd58: net_byte = hexdig(net_pktcnt[7:4]);
+            7'd59: net_byte = hexdig(net_pktcnt[3:0]);
+            7'd60: net_byte = " ";
+            7'd61: net_byte = "M";
+            7'd62: net_byte = "=";
+            7'd63: net_byte = hexdig(net_msgs[15:12]);
+            7'd64: net_byte = hexdig(net_msgs[11:8]);
+            7'd65: net_byte = hexdig(net_msgs[7:4]);
+            7'd66: net_byte = hexdig(net_msgs[3:0]);
+            7'd67: net_byte = 8'h0D;
             default: net_byte = 8'h0A;
         endcase
     end
@@ -369,12 +385,21 @@ module uart_console #(
         endcase
     end
 
-    wire [7:0] id_byte = (sidx == 6'd8)  ? (8'd64 + HOST_ID)          // 1->"A", 2->"B"
-                       : (sidx == 6'd14) ? hexdig(build_id[15:12])
-                       : (sidx == 6'd15) ? hexdig(build_id[11:8])
-                       : (sidx == 6'd16) ? hexdig(build_id[7:4])
-                       : (sidx == 6'd17) ? hexdig(build_id[3:0])
-                                         : id_msg[sidx[4:0]];
+    // MAADR echoed straight from the part, so a wrong MAC address is visible
+    // rather than merely suspected: the unicast receive filter matches against
+    // these registers, so if they are wrong the node answers broadcast ARP but
+    // silently drops every unicast frame addressed to it.
+    wire [3:0] mac_nib  = mac_rb[(11 - (sidx - 7'd23)) * 4 +: 4];
+    wire [3:0] macd_nib = mac_d [(11 - (sidx - 7'd38)) * 4 +: 4];
+
+    wire [7:0] id_byte = (sidx == 7'd8)  ? (8'd64 + HOST_ID)          // 1->"A", 2->"B"
+                       : (sidx == 7'd14) ? hexdig(build_id[15:12])
+                       : (sidx == 7'd15) ? hexdig(build_id[11:8])
+                       : (sidx == 7'd16) ? hexdig(build_id[7:4])
+                       : (sidx == 7'd17) ? hexdig(build_id[3:0])
+                       : (sidx >= 7'd23 && sidx <= 7'd34) ? hexdig(mac_nib)
+                       : (sidx >= 7'd38 && sidx <= 7'd49) ? hexdig(macd_nib)
+                                         : id_msg[sidx[5:0]];
 
     wire [7:0] send_byte = (cur == T_BANNER) ?
                              ((sidx == 6'd15) ? (8'd64 + HOST_ID) : banner[sidx[4:0]])

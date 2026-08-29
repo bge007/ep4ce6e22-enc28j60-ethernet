@@ -182,7 +182,10 @@ module tb_uart;
         // work out which board is on the other end of a console cable by
         // listening alone -- no reset (which would throw away the run's state)
         // and no keystroke (which would collide with the typed-message path).
-        #(BIT_NS * 12 * 22);
+        // The ID line is 52 characters now that it carries the MAC readback;
+        // this window has to clear the whole line or the checks that follow
+        // start reading mid-sentence.
+        #(BIT_NS * 12 * 56);
         check(contains("ID HOST=A BLD=", 14) >= 0,
               "identity line missing or malformed");
         $display("INFO: ID line seen");

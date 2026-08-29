@@ -211,7 +211,44 @@ Set-Location $root
 # writes the board's non-volatile config flash instead of SRAM -- needs the
 # spiOverJtag bridge, which openFPGALoader finds via OPENFPGALOADER_SOJ_DIR
 # and --fpga-part. Verified on hardware 2026-08-23.
+# A clone USB-Blaster that has come loose, or a board without power on its
+# JTAG header, does not fail cleanly: openFPGALoader enumerates over USB and
+# then reads a constant noise pattern off TDO, reporting it as an unknown
+# IDCODE. Checking first turns a confusing late failure -- after a two-minute
+# compile -- into an immediate, actionable one. This has bitten repeatedly.
+function Assert-JtagChain {
+    if (Test-Path $GIT_USR_BIN) { $env:PATH = "$GIT_USR_BIN;$env:PATH" }
+    # Not "2>&1": in Windows PowerShell that wraps each stderr line from a
+    # native exe in an ErrorRecord (NativeCommandError), which surfaces as a
+    # thrown error rather than text we can match on. Send stderr to a file and
+    # read it back instead.
+    # ...and the script-wide "Stop" preference makes even a file-redirected
+    # native stderr terminating, so relax it for the duration of the probe.
+    $errFile = [System.IO.Path]::GetTempFileName()
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $stdout = & $LOADER -c usb-blaster --detect 2>$errFile
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    $out = ($stdout | Out-String) + (Get-Content $errFile -Raw -ErrorAction SilentlyContinue)
+    Remove-Item $errFile -ErrorAction SilentlyContinue
+    if ($out -match '0x20f10dd') { return }
+    if ($out -match 'IDCODE:\s*(0x[0-9a-fA-F]+)') {
+        throw ("JTAG chain returned $($Matches[1]), which is not a Cyclone IV IDCODE " +
+               "(expected 0x20f10dd). That pattern is a floating TDO: the USB-Blaster " +
+               "enumerated, but the target is not answering. Check the 10-pin ribbon is " +
+               "seated and the board is powered, then retry.")
+    }
+    if ($out -match 'unable to open ftdi device') {
+        throw "USB-Blaster not found. Check it is plugged in and the WinUSB driver is bound (zadig)."
+    }
+    throw "JTAG chain check failed:`n$out"
+}
+
 function Program-Board([switch]$ToFlash) {
+    Assert-JtagChain
     $sof = "$OUTDIR\$REVISION.sof"
     $rbf = "$OUTDIR\$REVISION.rbf"
     if (-not (Test-Path $sof)) {

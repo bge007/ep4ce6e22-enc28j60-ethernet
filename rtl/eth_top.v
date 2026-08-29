@@ -108,6 +108,7 @@ module eth_top #(
     wire [15:0] eth_arp_reqs, eth_last_etype;
     wire [15:0] eth_tsv_count, eth_tsv_wire, eth_rx_resyncs;
     wire [15:0] eth_polls;
+    wire [15:0] eth_msgs_rx;
     wire        net_reinit_req;   // net_stack found the RX chain corrupt
     wire [7:0]  eth_pktcnt;
 
@@ -152,7 +153,7 @@ module eth_top #(
         .last_eir(eth_last_eir), .last_estat(eth_last_estat),
         .arp_reqs(eth_arp_reqs), .last_etype(eth_last_etype),
         .rx_resyncs(eth_rx_resyncs),
-        .polls(eth_polls), .last_pktcnt(eth_pktcnt),
+        .polls(eth_polls), .last_pktcnt(eth_pktcnt), .msgs_rx(eth_msgs_rx),
         .reinit_req(net_reinit_req),
         .tsv_count(eth_tsv_count), .tsv_wire(eth_tsv_wire),
         .tsv_stat2(eth_tsv_s2), .tsv_stat3(eth_tsv_s3)
@@ -388,6 +389,15 @@ module eth_top #(
     localparam S_CLKRDY_DAT = 5'd21;
     localparam S_CLKRDY_CHK = 5'd22;
     localparam S_CLKRDY_WAIT= 5'd23;   // step 4: >= 1 ms for the reset to complete
+    // Read MAADR1..6 back after configuring them. MAC-type registers return a
+    // DUMMY byte before the data (datasheet 4.2.1, Figure 4-4) -- three bytes
+    // per read, not two. Getting that wrong is why this project's earlier
+    // MAC-register readback attempts returned nonsense and were abandoned,
+    // which in turn meant the MAC address was written but never verified.
+    localparam S_MACRD_OP   = 5'd24;
+    localparam S_MACRD_DUM  = 5'd25;
+    localparam S_MACRD_DAT  = 5'd26;
+    localparam S_MACRD_NEXT = 5'd27;
 
     reg [4:0]  state;
     reg [22:0] wait_cnt;
@@ -395,6 +405,22 @@ module eth_top #(
     reg        m12_ph2;             // explicit SPI phase; never infer it from data
     reg [7:0]  estat_rb;
     reg [15:0] reinits;             // full re-initialisations performed
+    reg [47:0] mac_rb;              // MAADR1..6, captured from the 3rd byte
+    reg [47:0] mac_d;               // ... and from the 2nd, to settle which
+                                    // byte actually carries the data
+    reg [2:0]  mac_idx;
+    // MAADR1 is the first octet on the wire but lives at 04h; the file order
+    // is deliberately not sequential (datasheet Table 3-1, bank 3).
+    function [4:0] maadr_addr(input [2:0] i);
+        case (i)
+            3'd0: maadr_addr = 5'h04;   // MAADR1
+            3'd1: maadr_addr = 5'h05;   // MAADR2
+            3'd2: maadr_addr = 5'h02;   // MAADR3
+            3'd3: maadr_addr = 5'h03;   // MAADR4
+            3'd4: maadr_addr = 5'h00;   // MAADR5
+            default: maadr_addr = 5'h01; // MAADR6
+        endcase
+    endfunction
     reg [7:0]  erevid;
     reg        spi_busy_d;
 
@@ -423,6 +449,9 @@ module eth_top #(
             m12_ph2    <= 1'b0;
             estat_rb   <= 8'h00;
             reinits    <= 16'd0;
+            mac_rb     <= 48'd0;
+            mac_d      <= 48'd0;
+            mac_idx    <= 3'd0;
             erevid     <= 8'h00;
             m2_started <= 1'b0;
             m2_idx     <= 6'd0;
@@ -638,9 +667,58 @@ module eth_top #(
                     end
 
                 S_M2_DONE: begin
-                    eth_ready <= 1'b1;
-                    state     <= S_HANDOFF;
+                    mac_idx <= 3'd0;
+                    state   <= S_MACRD_OP;
                 end
+
+                // ---- read MAADR1..6 back (3-byte MAC-register read) ----
+                // Bank 3 is still selected from the MAC address writes above.
+                S_MACRD_OP: begin
+                    m12_cs_n      <= 1'b0;
+                    m12_spi_tx    <= {3'b000, maadr_addr(mac_idx)};   // RCR
+                    m12_spi_start <= 1'b1;
+                    state         <= S_MACRD_DUM;
+                end
+                S_MACRD_DUM:
+                    if (spi_done) begin
+                        m12_spi_tx    <= 8'h00;   // clocks out the dummy byte
+                        m12_spi_start <= 1'b1;
+                        state         <= S_MACRD_DAT;
+                    end
+                S_MACRD_DAT:
+                    if (spi_done) begin
+                        // byte 2 -- the dummy position per the datasheet
+                        case (mac_idx)
+                            3'd0: mac_d[47:40] <= spi_rx;
+                            3'd1: mac_d[39:32] <= spi_rx;
+                            3'd2: mac_d[31:24] <= spi_rx;
+                            3'd3: mac_d[23:16] <= spi_rx;
+                            3'd4: mac_d[15:8]  <= spi_rx;
+                            default: mac_d[7:0] <= spi_rx;
+                        endcase
+                        m12_spi_tx    <= 8'h00;   // clocks in the real data
+                        m12_spi_start <= 1'b1;
+                        state         <= S_MACRD_NEXT;
+                    end
+                S_MACRD_NEXT:
+                    if (spi_done) begin
+                        m12_cs_n <= 1'b1;
+                        case (mac_idx)
+                            3'd0: mac_rb[47:40] <= spi_rx;
+                            3'd1: mac_rb[39:32] <= spi_rx;
+                            3'd2: mac_rb[31:24] <= spi_rx;
+                            3'd3: mac_rb[23:16] <= spi_rx;
+                            3'd4: mac_rb[15:8]  <= spi_rx;
+                            default: mac_rb[7:0] <= spi_rx;
+                        endcase
+                        if (mac_idx == 3'd5) begin
+                            eth_ready <= 1'b1;
+                            state     <= S_HANDOFF;
+                        end else begin
+                            mac_idx <= mac_idx + 3'd1;
+                            state   <= S_MACRD_OP;
+                        end
+                    end
 
                 // net_stack owns m12_cs_n/m12_spi_start/m12_spi_tx from here,
                 // until it asks for a re-initialisation. erevid stays frozen
@@ -695,7 +773,7 @@ module eth_top #(
     // glance which image is on which board is worth more than it sounds:
     // several wrong conclusions during bring-up came from testing a node that
     // was quietly running an older bitstream.
-    localparam [15:0] BUILD_ID = 16'h0003;
+    localparam [15:0] BUILD_ID = 16'h0006;
 
     localparam integer OCOLS = 21;
 
@@ -769,7 +847,8 @@ module eth_top #(
         .net_eir(eth_last_eir), .net_estat(eth_last_estat),
         .net_arpreqs(eth_arp_reqs), .net_etype(eth_last_etype),
         .net_resyncs(eth_rx_resyncs),
-        .build_id(BUILD_ID),
+        .build_id(BUILD_ID), .mac_rb(mac_rb), .mac_d(mac_d),
+        .net_msgs(eth_msgs_rx),
         .net_polls(eth_polls), .net_pktcnt(eth_pktcnt),
         .net_tsvcount(eth_tsv_count), .net_tsvwire(eth_tsv_wire),
         .net_tsvs2(eth_tsv_s2), .net_tsvs3(eth_tsv_s3),

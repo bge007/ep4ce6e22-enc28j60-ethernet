@@ -390,6 +390,14 @@ module tb_m4;
                 end
             end
         end
+        // Two messages accepted: the unicast in scenario 1 and the broadcast
+        // in scenario 3. rx_updated is a one-cycle pulse, so without this
+        // counter nothing outside the OLED could tell whether a message was
+        // actually accepted -- which made board-to-board messaging impossible
+        // to verify without looking at the panel.
+        check(dut.msgs_rx == 16'd2,
+              "msgs_rx did not count both accepted messages");
+
         $display("INFO: scenario 3 (broadcast UDP receive) complete, errors so far = %0d", errors);
 
 
@@ -400,7 +408,7 @@ module tb_m4;
               "RXEN was cleared outside an RXRST pulse (bank select clobbered ECON1)");
 
         if (errors == 0)
-            $display("PASS: UDP receive (unicast + broadcast, payload byte-correct, no spurious reply) and UDP send (byte-correct header/checksum/payload, ETXND, TXRTS) all correct, RXEN never dropped");
+            $display("PASS: UDP receive (unicast + broadcast, payload byte-correct, no spurious reply) and UDP send (byte-correct header/checksum/payload, ETXND, TXRTS) all correct, messages counted, RXEN never dropped");
         else
             $display("%0d ERROR(S)", errors);
         $finish;

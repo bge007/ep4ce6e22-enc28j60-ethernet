@@ -125,7 +125,7 @@ Total ~2,500 LE of 6,272 — comfortable margin, no external RAM.
 | M1 | SPI alive — project, pinout, `spi_master`, EREVID readback | `0x06` on the LEDs | **Confirmed on both nodes** |
 | M2 | Link up — full init FSM, MAC config, RXEN | Link established | RXEN confirmed on hardware (`ECON1` readback); link LED not yet visually checked |
 | M3 | Ping — RX/TX engines, ARP responder (ICMP echo deferred to M4) | Sustained ping, 0% loss | **ARP answering on hardware**; not yet *sustained* — see the stability section below |
-| M4 | UDP echo — parsing, checksums, echo path | 10k datagrams echoed correctly | Simulated; receive half confirmed on hardware (PC broadcast → OLED). Board-to-board blocked on M3 stability |
+| M4 | UDP echo — parsing, checksums, echo path | 10k datagrams echoed correctly | Simulated; on hardware the send path is confirmed (the switch counts the frame) and broadcast receive works, but **unicast receive is blocked** — the part never got its MAC address; see fault 5 in [enc28j60.md](enc28j60.md) |
 | M5 | Max speed — UDP blaster, measurement scripts, full duplex | >= 9.3 Mbit/s, loss-free | Not started |
 
 Each milestone is a self-contained chunk; M3 is the largest.
