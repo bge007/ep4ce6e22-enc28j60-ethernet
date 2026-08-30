@@ -120,6 +120,7 @@ module net_stack #(
     // showed it, which makes board-to-board messaging untestable without eyes
     // on the panel.
     output reg  [15:0]  msgs_rx,
+    output reg  [15:0]  icmp_replies,   // ICMP echo replies sent
     output reg  [15:0]  polls,
     output reg  [7:0]   last_pktcnt,
     output reg  [15:0]  tsv_count,
@@ -192,6 +193,15 @@ module net_stack #(
     localparam integer MSG_HDR_LEN = 14 + 20 + 8;                  // 42
     localparam integer MSG_TX_LEN  = MSG_HDR_LEN + MSG_LEN;        // 63
     localparam [15:0]  MSG_ETXND   = ETXST + MSG_TX_LEN[15:0];
+    localparam [7:0]   IP_PROTO_ICMP = 8'h01;
+    localparam [7:0]   IP_PROTO_UDP  = 8'h11;
+    // An ICMP echo is answered by sending the request's own payload back, so
+    // the payload has to be stored. 40 bytes covers the 8-byte ICMP header
+    // plus the 32-byte payload a default Windows `ping` sends. Larger echoes
+    // are walked and ignored rather than half-answered -- a truncated reply is
+    // worse than none, because the sender rejects it and retries.
+    localparam integer ICMP_MAX      = 40;
+    localparam [15:0]  IP_HDR_LEN    = 16'd20;
     localparam [15:0]  UDP_PORT    = 16'd1234;                     // 0x04D2
 
     // A UDP message is accepted if it is addressed to us OR broadcast. The
@@ -270,11 +280,24 @@ module net_stack #(
     //   42-62 UDP payload (21 bytes, the message)
     // ------------------------------------------------------------------
     reg [47:0] sender_mac;
+    // The Ethernet header's own source address and the IP header's source
+    // address, both needed to address an ICMP reply. Kept separate from
+    // sender_mac, which the ARP path fills from the ARP payload's SHA field.
+    reg [47:0] eth_src_mac;
+    reg [31:0] ip_src_ip;
+    reg [15:0] ip_total_len;
+    reg [15:0] icmp_cksum_rx;
+    reg        is_icmp, is_echo_req, dest_ip_exact;
+    reg  [7:0] icmp_buf [0:ICMP_MAX-1];
+    reg        tx_icmp;        // which frame the shared TX path is sending
     reg [31:0] sender_ip, target_ip;
     reg [15:0] next_rdpt;      // where the next RX packet's header begins
     reg [15:0] cur_next_ptr;   // this packet's own "next packet" field
-    reg [5:0]  rxpos;          // 0..62, byte offset within the frame (fits: max 63)
-    reg [5:0]  txpos;          // 0..63 likewise
+    // 7 bits, not 6. An ICMP echo reply to a default 32-byte ping payload is a
+    // 74-byte frame, and a 6-bit counter wraps silently at 64 -- the same class
+    // of width assumption that made m2_idx execute the wrong table entry.
+    reg [6:0]  rxpos;          // byte offset within the received frame
+    reg [6:0]  txpos;          // byte offset within the frame being written
     reg [7:0]  hdr_byte_idx;   // 0..5, the 6-byte per-packet RX header
     reg        is_arp, is_request, target_is_us;
     reg        is_ip, is_udp, dest_ip_is_us, is_our_port;  // dest_ip_is_us: ours OR broadcast
@@ -376,6 +399,100 @@ module net_stack #(
 
     // One TX byte, addressed by txpos, for the 42-byte ARP reply (43 with
     // the leading per-packet control byte handled separately in S_WBM_OP).
+    // One's-complement fold, applied twice so a carry out of the first fold
+    // cannot be left behind.
+    function [15:0] fold16(input [31:0] v);
+        reg [31:0] t;
+        begin
+            t      = (v & 32'h0000FFFF) + (v >> 16);
+            t      = (t & 32'h0000FFFF) + (t >> 16);
+            fold16 = t[15:0];
+        end
+    endfunction
+
+    // IPv4 header checksum over the reply header, whose only variable fields
+    // are the total length and the destination address (our own source address
+    // is a constant). Computed rather than copied: the request's checksum
+    // covers the request's addresses, which are swapped in the reply.
+    wire [31:0] ip_sum_raw = 32'h4500
+                           + {16'd0, ip_total_len}
+                           + 32'h4001                       // TTL 64, proto ICMP
+                           + {16'd0, OUR_IP[31:16]} + {16'd0, OUR_IP[15:0]}
+                           + {16'd0, ip_src_ip[31:16]} + {16'd0, ip_src_ip[15:0]};
+    wire [15:0] ip_cksum = ~fold16(ip_sum_raw);
+
+    // ICMP checksum by incremental update (RFC 1624): the only field that
+    // changes is the type, 8 (echo request) to 0 (echo reply), so
+    //     HC' = ~(~HC + ~m + m')
+    // with m and m' the old and new 16-bit words holding type and code. This
+    // avoids re-summing the payload, which would mean another pass over the
+    // buffer for no benefit.
+    wire [15:0] icmp_m_old = {8'd8, icmp_buf[1]};
+    wire [15:0] icmp_m_new = {8'd0, icmp_buf[1]};
+    wire [31:0] icmp_sum_raw = {16'd0, ~icmp_cksum_rx}
+                             + {16'd0, ~icmp_m_old}
+                             + {16'd0, icmp_m_new};
+    wire [15:0] icmp_cksum = ~fold16(icmp_sum_raw);
+
+    // Total frame length of the reply, and the last byte index the TX walk
+    // writes. 14 bytes of Ethernet header plus whatever the IP header claimed.
+    wire [15:0] icmp_frame_len = 16'd14 + ip_total_len;
+    // ETXND is inclusive of the last byte written, and the control byte sits
+    // in front of the frame, so this is ETXST + 1 + len - 1.
+    wire [15:0] tx_etxnd = tx_icmp ? (ETXST + icmp_frame_len) : ARP_ETXND;
+
+    // The reply is the request with the addresses swapped, the type set to 0
+    // and the checksums redone -- everything from byte 38 onward (identifier,
+    // sequence number, payload) goes back exactly as it arrived, which is what
+    // the sender checks.
+    function [7:0] icmp_reply_byte(input [6:0] p);
+        begin
+            case (p)
+                7'd0:  icmp_reply_byte = eth_src_mac[47:40];
+                7'd1:  icmp_reply_byte = eth_src_mac[39:32];
+                7'd2:  icmp_reply_byte = eth_src_mac[31:24];
+                7'd3:  icmp_reply_byte = eth_src_mac[23:16];
+                7'd4:  icmp_reply_byte = eth_src_mac[15:8];
+                7'd5:  icmp_reply_byte = eth_src_mac[7:0];
+                7'd6:  icmp_reply_byte = OUR_MAC[47:40];
+                7'd7:  icmp_reply_byte = OUR_MAC[39:32];
+                7'd8:  icmp_reply_byte = OUR_MAC[31:24];
+                7'd9:  icmp_reply_byte = OUR_MAC[23:16];
+                7'd10: icmp_reply_byte = OUR_MAC[15:8];
+                7'd11: icmp_reply_byte = OUR_MAC[7:0];
+                7'd12: icmp_reply_byte = 8'h08;              // EtherType IPv4
+                7'd13: icmp_reply_byte = 8'h00;
+                7'd14: icmp_reply_byte = 8'h45;              // IPv4, IHL 5
+                7'd15: icmp_reply_byte = 8'h00;              // DSCP/ECN
+                7'd16: icmp_reply_byte = ip_total_len[15:8];
+                7'd17: icmp_reply_byte = ip_total_len[7:0];
+                7'd18: icmp_reply_byte = 8'h00;              // identification
+                7'd19: icmp_reply_byte = 8'h00;
+                7'd20: icmp_reply_byte = 8'h00;              // flags / fragment
+                7'd21: icmp_reply_byte = 8'h00;
+                7'd22: icmp_reply_byte = 8'd64;              // TTL
+                7'd23: icmp_reply_byte = IP_PROTO_ICMP;
+                7'd24: icmp_reply_byte = ip_cksum[15:8];
+                7'd25: icmp_reply_byte = ip_cksum[7:0];
+                7'd26: icmp_reply_byte = OUR_IP[31:24];
+                7'd27: icmp_reply_byte = OUR_IP[23:16];
+                7'd28: icmp_reply_byte = OUR_IP[15:8];
+                7'd29: icmp_reply_byte = OUR_IP[7:0];
+                7'd30: icmp_reply_byte = ip_src_ip[31:24];
+                7'd31: icmp_reply_byte = ip_src_ip[23:16];
+                7'd32: icmp_reply_byte = ip_src_ip[15:8];
+                7'd33: icmp_reply_byte = ip_src_ip[7:0];
+                7'd34: icmp_reply_byte = 8'h00;              // type: echo reply
+                7'd35: icmp_reply_byte = icmp_buf[1];        // code, echoed
+                7'd36: icmp_reply_byte = icmp_cksum[15:8];
+                7'd37: icmp_reply_byte = icmp_cksum[7:0];
+                default:
+                    icmp_reply_byte = (p >= 7'd38 && (p - 7'd34) < ICMP_MAX)
+                                    ? icmp_buf[p - 7'd34] : 8'h00;
+            endcase
+        end
+    endfunction
+
     function [7:0] arp_reply_byte(input [5:0] p);
         begin
             case (p)
@@ -539,6 +656,7 @@ module net_stack #(
             next_rdpt        <= ERXST;
             op_ph2           <= 1'b0;
             msgs_rx          <= 16'd0;
+            icmp_replies     <= 16'd0;
             polls            <= 16'd0;
             last_pktcnt      <= 8'd0;
             wait_cnt         <= 0;
@@ -557,6 +675,10 @@ module net_stack #(
             tsv_wire         <= 16'd0;
             tsv_stat2        <= 8'd0;
             tsv_stat3        <= 8'd0;
+            tx_icmp          <= 1'b0;
+            eth_src_mac      <= 48'd0;
+            ip_src_ip        <= 32'd0;
+            icmp_cksum_rx    <= 16'd0;
         end else if (!start && state == S_INIT0) begin
             // Idle until eth_top hands off the bus. Dropping reinit_req here
             // is what ends the request: by the time this branch is taken,
@@ -655,6 +777,10 @@ module net_stack #(
                     is_ip         <= 1'b0;
                     is_udp        <= 1'b0;
                     dest_ip_is_us <= 1'b0;
+                    dest_ip_exact <= 1'b0;
+                    is_icmp       <= 1'b0;
+                    is_echo_req   <= 1'b0;
+                    ip_total_len  <= 16'd0;
                     is_our_port   <= 1'b0;
                     state        <= S_RBM_OPWAIT;
                 end
@@ -703,29 +829,67 @@ module net_stack #(
                 end
                 S_RBM_BOD_WT:
                     if (spi_done) begin
-                        if (rxpos < 6'd14) begin
-                            if (rxpos == 6'd12) begin
+                        // Bytes 6..11 are the Ethernet source address on every
+                        // frame, ARP or IP. The ARP path takes its own copy from
+                        // the ARP payload's SHA field instead; ICMP has no such
+                        // field and must use this one.
+                        if (rxpos >= 7'd6 && rxpos <= 7'd11)
+                            eth_src_mac <= {eth_src_mac[39:0], spi_rx};
+
+                        if (rxpos < 7'd14) begin
+                            if (rxpos == 7'd12) begin
                                 ethertype_hi08     <= (spi_rx == 8'h08);
                                 last_etype[15:8]   <= spi_rx;
                             end
-                            if (rxpos == 6'd13) begin
+                            if (rxpos == 7'd13) begin
                                 last_etype[7:0] <= spi_rx;
                             end
-                            if (rxpos == 6'd13) begin
+                            if (rxpos == 7'd13) begin
                                 is_arp <= ethertype_hi08 && (spi_rx == 8'h06);
                                 is_ip  <= ethertype_hi08 && (spi_rx == 8'h00);
                             end
                         end else if (is_ip) begin
                             case (rxpos)
-                                6'd23: is_udp          <= (spi_rx == 8'h11);
-                                6'd30: target_ip[31:24] <= spi_rx;
-                                6'd31: target_ip[23:16] <= spi_rx;
-                                6'd32: target_ip[15:8]  <= spi_rx;
-                                6'd33: dest_ip_is_us    <= dest_accept({target_ip[31:8], spi_rx});
-                                6'd36: is_our_port      <= (spi_rx == UDP_PORT[15:8]);
-                                6'd37: is_our_port      <= is_our_port && (spi_rx == UDP_PORT[7:0]);
-                                default:
-                                    if (rxpos >= 6'd42) udp_payload[rxpos - 6'd42] <= spi_rx;
+                                7'd16: ip_total_len[15:8] <= spi_rx;
+                                7'd17: ip_total_len[7:0]  <= spi_rx;
+                                7'd23: begin
+                                    is_udp  <= (spi_rx == IP_PROTO_UDP);
+                                    is_icmp <= (spi_rx == IP_PROTO_ICMP);
+                                end
+                                7'd26: ip_src_ip[31:24] <= spi_rx;
+                                7'd27: ip_src_ip[23:16] <= spi_rx;
+                                7'd28: ip_src_ip[15:8]  <= spi_rx;
+                                7'd29: ip_src_ip[7:0]   <= spi_rx;
+                                7'd30: target_ip[31:24] <= spi_rx;
+                                7'd31: target_ip[23:16] <= spi_rx;
+                                7'd32: target_ip[15:8]  <= spi_rx;
+                                7'd33: begin
+                                    dest_ip_is_us <= dest_accept({target_ip[31:8], spi_rx});
+                                    // An echo is answered only when addressed
+                                    // to us exactly. Replying to a broadcast
+                                    // ping would put every node on the segment
+                                    // on the wire at once.
+                                    dest_ip_exact <= ({target_ip[31:8], spi_rx} == OUR_IP);
+                                end
+                                default: begin
+                                    if (is_udp && rxpos == 7'd36)
+                                        is_our_port <= (spi_rx == UDP_PORT[15:8]);
+                                    if (is_udp && rxpos == 7'd37)
+                                        is_our_port <= is_our_port && (spi_rx == UDP_PORT[7:0]);
+                                    if (is_udp && rxpos >= 7'd42)
+                                        udp_payload[rxpos - 7'd42] <= spi_rx;
+                                    // ICMP body, stored verbatim so it can be
+                                    // echoed back byte for byte.
+                                    if (is_icmp && rxpos == 7'd34)
+                                        is_echo_req <= (spi_rx == 8'd8);
+                                    if (is_icmp && rxpos == 7'd36)
+                                        icmp_cksum_rx[15:8] <= spi_rx;
+                                    if (is_icmp && rxpos == 7'd37)
+                                        icmp_cksum_rx[7:0] <= spi_rx;
+                                    if (is_icmp && rxpos >= 7'd34 &&
+                                        (rxpos - 7'd34) < ICMP_MAX)
+                                        icmp_buf[rxpos - 7'd34] <= spi_rx;
+                                end
                             endcase
                         end else begin
                             case (rxpos)
@@ -749,28 +913,41 @@ module net_stack #(
                         end
 
                         // Neither ARP nor IP: stop reading, nothing more to learn.
-                        if (rxpos == 6'd13 && !(ethertype_hi08 && (spi_rx == 8'h06 || spi_rx == 8'h00))) begin
+                        if (rxpos == 7'd13 && !(ethertype_hi08 && (spi_rx == 8'h06 || spi_rx == 8'h00))) begin
                             cs_n  <= 1'b1;
                             state <= S_CLEANUP0;
                         // IP path: bail the moment it's clearly not "UDP to our port".
-                        end else if (is_ip && rxpos == 6'd23 && spi_rx != 8'h11) begin
+                        end else if (is_ip && rxpos == 7'd23 &&
+                                     spi_rx != IP_PROTO_UDP && spi_rx != IP_PROTO_ICMP) begin
                             cs_n  <= 1'b1;
                             state <= S_CLEANUP0;
-                        end else if (is_ip && rxpos == 6'd33 && !dest_accept({target_ip[31:8], spi_rx})) begin
+                        end else if (is_ip && rxpos == 7'd33 && !dest_accept({target_ip[31:8], spi_rx})) begin
                             cs_n  <= 1'b1;
                             state <= S_CLEANUP0;
-                        end else if (is_ip && rxpos == 6'd37 && !(is_our_port && spi_rx == UDP_PORT[7:0])) begin
+                        // An echo larger than the buffer is walked no further:
+                        // it cannot be answered, so reading the rest is wasted
+                        // SPI traffic.
+                        end else if (is_icmp && rxpos == 7'd34 &&
+                                     ip_total_len > (IP_HDR_LEN + ICMP_MAX)) begin
                             cs_n  <= 1'b1;
                             state <= S_CLEANUP0;
-                        end else if (is_ip && rxpos == 6'd62) begin
+                        // Last byte of an ICMP frame: 14 bytes of Ethernet
+                        // header plus whatever the IP header declared.
+                        end else if (is_icmp && rxpos == (7'd13 + ip_total_len[6:0])) begin
                             cs_n  <= 1'b1;
                             state <= S_CLEANUP0;
-                        end else if (!is_ip && rxpos == 6'd41) begin
+                        end else if (is_udp && rxpos == 7'd37 && !(is_our_port && spi_rx == UDP_PORT[7:0])) begin
+                            cs_n  <= 1'b1;
+                            state <= S_CLEANUP0;
+                        end else if (is_udp && rxpos == 7'd62) begin
+                            cs_n  <= 1'b1;
+                            state <= S_CLEANUP0;
+                        end else if (!is_ip && rxpos == 7'd41) begin
                             target_is_us <= ({target_ip[31:8], spi_rx} == OUR_IP);
                             cs_n         <= 1'b1;
                             state        <= S_CLEANUP0;
                         end else begin
-                            rxpos <= rxpos + 6'd1;
+                            rxpos <= rxpos + 7'd1;
                             state <= S_RBM_BOD_GO;
                         end
                     end
@@ -797,7 +974,12 @@ module net_stack #(
                     // Decide whether to reply *before* touching ECON1/ERXRDPT,
                     // so the branch below always lands correctly.
                     if (is_arp && is_request && target_is_us) begin
-                        state <= S_TX_BANK;
+                        tx_icmp <= 1'b0;
+                        state   <= S_TX_BANK;
+                    end else if (is_icmp && is_echo_req && dest_ip_exact &&
+                                 ip_total_len <= (IP_HDR_LEN + ICMP_MAX)) begin
+                        tx_icmp <= 1'b1;
+                        state   <= S_TX_BANK;
                     end else begin
                         state <= S_CLEANUP1;
                     end
@@ -864,29 +1046,31 @@ module net_stack #(
                 // ARP_TX_LEN -- see the ARP_ETXND comment above for why this
                 // isn't left to MACON3.PADCFG.
                 S_WBM_BOD_GO: begin
-                    spi_tx    <= (txpos == 6'd0) ? 8'h07 : arp_reply_byte(txpos - 6'd1);
+                    spi_tx    <= (txpos == 7'd0) ? 8'h07
+                               : tx_icmp        ? icmp_reply_byte(txpos - 7'd1)
+                                                : arp_reply_byte(txpos - 7'd1);
                     spi_start <= 1'b1;
                     state     <= S_WBM_BOD_WT;
                 end
                 S_WBM_BOD_WT:
                     if (spi_done) begin
-                        if (txpos == ARP_TX_LEN[5:0]) begin
+                        if (txpos == (tx_icmp ? icmp_frame_len[6:0] : ARP_TX_LEN[6:0])) begin
                             cs_n  <= 1'b1;
                             state <= S_SETETXND0;
                         end else begin
-                            txpos <= txpos + 6'd1;
+                            txpos <= txpos + 7'd1;
                             state <= S_WBM_BOD_GO;
                         end
                     end
 
                 S_SETETXND0: begin
-                    wcr_addr  <= A_ETXNDL; wcr_data <= ARP_ETXND[7:0];
+                    wcr_addr  <= A_ETXNDL; wcr_data <= tx_etxnd[7:0];
                     ret_state <= S_SETETXND1;
                     state     <= S_WCR_OP;
                 end
                 S_SETETXND1: begin
-                    wcr_addr  <= A_ETXNDH; wcr_data <= ARP_ETXND[15:8];
-                    tsv_addr  <= ARP_ETXND + 16'd1;
+                    wcr_addr  <= A_ETXNDH; wcr_data <= tx_etxnd[15:8];
+                    tsv_addr  <= tx_etxnd + 16'd1;
                     ret_state <= S_TXRTS;
                     state     <= S_WCR_OP;
                 end
@@ -946,9 +1130,10 @@ module net_stack #(
                     // untested protocol edge case. 42 bytes at 10 Mbit half
                     // duplex is ~34 us; 500 us at 50 MHz is comfortable.
                     if (wait_cnt == 27'd25_000) begin
-                        wait_cnt         <= 0;
-                        arp_replies_sent <= arp_replies_sent + 16'd1;
-                        state            <= S_RD_EIR_GO;
+                        wait_cnt <= 0;
+                        if (tx_icmp) icmp_replies     <= icmp_replies + 16'd1;
+                        else         arp_replies_sent <= arp_replies_sent + 16'd1;
+                        state    <= S_RD_EIR_GO;
                     end else begin
                         wait_cnt <= wait_cnt + 1'b1;
                     end
@@ -1163,7 +1348,7 @@ module net_stack #(
                             tx_rd_addr <= 5'd0;
                             state      <= S_MSGBOD_GO;
                         end else begin
-                            txpos <= txpos + 6'd1;
+                            txpos <= txpos + 7'd1;
                             state <= S_MSGHDR_GO;
                         end
                     end
@@ -1179,7 +1364,7 @@ module net_stack #(
                             cs_n  <= 1'b1;
                             state <= S_MSGETXND0;
                         end else begin
-                            txpos <= txpos + 6'd1;
+                            txpos <= txpos + 7'd1;
                             state <= S_MSGBOD_GO;
                         end
                     end

@@ -165,6 +165,9 @@ module tb_m4;
     wire [4:0] rx_rd_addr_dut;
     wire [7:0] rx_rd_data;
     wire       rx_updated;
+    wire [15:0] icmp_replies;   // declared before the DUT: a port
+                                // connection to an undeclared name would
+                                // otherwise create a 1-bit implicit net
     reg  [4:0] rx_rd_addr;
     assign rx_rd_addr_dut = rx_rd_addr;
 
@@ -174,6 +177,7 @@ module tb_m4;
         .spi_rx(spi_rx), .spi_busy(spi_busy),
         .tx_rd_addr(tx_rd_addr), .tx_rd_data(tx_rd_data), .send_req(send_req),
         .force_reinit(1'b0),
+        .icmp_replies(icmp_replies),
         .rx_rd_addr(rx_rd_addr_dut), .rx_rd_data(rx_rd_data), .rx_updated(rx_updated),
         .frames_seen(frames_seen), .arp_replies_sent(arp_replies_sent),
         .last_eir(last_eir), .last_estat(last_estat),
@@ -186,6 +190,10 @@ module tb_m4;
     );
 
     integer errors = 0;
+    reg  [15:0] icmp_before;
+    reg         icmp_ok;
+    reg  [31:0] chk_sum;
+    integer     kk;
     task check(input cond, input [120*8:0] what);
         if (!cond) begin $display("FAIL: %0s", what); errors = errors + 1; end
     endtask
@@ -213,6 +221,59 @@ module tb_m4;
 
     // Inject a synthetic UDP datagram addressed to OUR_IP:1234, matching
     // what real hardware would have delivered into the RX buffer.
+    // An ICMP echo request with a 32-byte payload -- exactly what a default
+    // Windows `ping` sends, which is the case that has to work.
+    task inject_icmp_echo(input [15:0] next_ptr, input [15:0] base_addr,
+                          input [31:0] dst_ip, input [15:0] ident,
+                          input [15:0] seqno);
+        integer i;
+        reg [7:0]  frame [0:73];
+        reg [31:0] sum;
+        begin
+            frame[ 0]=OUR_MAC[47:40]; frame[ 1]=OUR_MAC[39:32];
+            frame[ 2]=OUR_MAC[31:24]; frame[ 3]=OUR_MAC[23:16];
+            frame[ 4]=OUR_MAC[15:8];  frame[ 5]=OUR_MAC[7:0];
+            frame[ 6]=PEER_MAC[47:40]; frame[ 7]=PEER_MAC[39:32];
+            frame[ 8]=PEER_MAC[31:24]; frame[ 9]=PEER_MAC[23:16];
+            frame[10]=PEER_MAC[15:8];  frame[11]=PEER_MAC[7:0];
+            frame[12]=8'h08; frame[13]=8'h00;
+            frame[14]=8'h45; frame[15]=8'h00;
+            frame[16]=8'h00; frame[17]=8'd60;          // total length 20 + 40
+            frame[18]=8'h00; frame[19]=8'h00;
+            frame[20]=8'h00; frame[21]=8'h00;
+            frame[22]=8'd64;
+            frame[23]=8'd1;                            // protocol = ICMP
+            frame[24]=8'h00; frame[25]=8'h00;
+            frame[26]=PEER_IP[31:24]; frame[27]=PEER_IP[23:16];
+            frame[28]=PEER_IP[15:8];  frame[29]=PEER_IP[7:0];
+            frame[30]=dst_ip[31:24];  frame[31]=dst_ip[23:16];
+            frame[32]=dst_ip[15:8];   frame[33]=dst_ip[7:0];
+            frame[34]=8'd8;                            // type = echo request
+            frame[35]=8'd0;                            // code
+            frame[36]=8'h00; frame[37]=8'h00;          // checksum, filled below
+            frame[38]=ident[15:8];  frame[39]=ident[7:0];
+            frame[40]=seqno[15:8];  frame[41]=seqno[7:0];
+            for (i = 0; i < 32; i = i + 1) frame[42+i] = 8'h61 + i[7:0];   // 'a'...
+
+            // Real ICMP checksum over the 40-byte message, so the design's
+            // incremental update has something valid to update from.
+            sum = 0;
+            for (i = 34; i < 74; i = i + 2)
+                sum = sum + {frame[i], frame[i+1]};
+            sum = (sum & 32'h0000FFFF) + (sum >> 16);
+            sum = (sum & 32'h0000FFFF) + (sum >> 16);
+            frame[36] = ~sum[15:8];
+            frame[37] = ~sum[7:0];
+
+            model.buf_mem[base_addr+0] = next_ptr[7:0];
+            model.buf_mem[base_addr+1] = next_ptr[15:8];
+            model.buf_mem[base_addr+2] = 8'h00; model.buf_mem[base_addr+3] = 8'h00;
+            model.buf_mem[base_addr+4] = 8'h00; model.buf_mem[base_addr+5] = 8'h00;
+            for (i = 0; i < 74; i = i + 1) model.buf_mem[base_addr+6+i] = frame[i];
+            model.pktcnt = 8'd1;
+        end
+    endtask
+
     task inject_udp_message(input [15:0] next_ptr, input [15:0] base_addr,
                             input [31:0] dst_ip);
         integer i;
@@ -401,6 +462,67 @@ module tb_m4;
 
         $display("INFO: scenario 3 (broadcast UDP receive) complete, errors so far = %0d", errors);
 
+        // ------------------------------------------------------------------
+        // Scenario 4: ICMP echo request -> byte-correct echo reply.
+        // ------------------------------------------------------------------
+        // This is what makes `ping` actually succeed rather than resolving ARP
+        // and timing out. Everything from the identifier onward has to come
+        // back unchanged -- the sender compares it -- and both checksums have
+        // to be right or the reply is silently discarded, which on hardware
+        // looks identical to no reply at all.
+        icmp_before = icmp_replies;
+        inject_icmp_echo(16'h0100, dut.next_rdpt, OUR_IP, 16'h1234, 16'h0001);
+        wait (icmp_replies == icmp_before + 16'd1);
+        #20_000;
+
+        // addressing: reply goes back to the sender, from us
+        check(model.buf_mem[16'h1A00] == 8'h07, "ICMP control byte not 0x07");
+        check(model.buf_mem[16'h1A01] == PEER_MAC[47:40], "ICMP reply dest MAC wrong");
+        check(model.buf_mem[16'h1A06] == PEER_MAC[7:0],   "ICMP reply dest MAC wrong");
+        check(model.buf_mem[16'h1A07] == OUR_MAC[47:40],  "ICMP reply src MAC wrong");
+        check(model.buf_mem[16'h1A0D] == 8'h08 && model.buf_mem[16'h1A0E] == 8'h00,
+              "ICMP reply EtherType not IPv4");
+        check(model.buf_mem[16'h1A18] == 8'd1, "ICMP reply protocol not 1");
+        check(model.buf_mem[16'h1A1B] == OUR_IP[31:24] &&
+              model.buf_mem[16'h1A1E] == OUR_IP[7:0], "ICMP reply source IP wrong");
+        check(model.buf_mem[16'h1A1F] == PEER_IP[31:24] &&
+              model.buf_mem[16'h1A22] == PEER_IP[7:0], "ICMP reply dest IP wrong");
+
+        // type must become 0, and identifier/sequence/payload come back intact
+        check(model.buf_mem[16'h1A23] == 8'd0, "ICMP reply type not 0 (echo reply)");
+        check(model.buf_mem[16'h1A27] == 8'h12 && model.buf_mem[16'h1A28] == 8'h34,
+              "ICMP identifier not echoed");
+        check(model.buf_mem[16'h1A29] == 8'h00 && model.buf_mem[16'h1A2A] == 8'h01,
+              "ICMP sequence number not echoed");
+        icmp_ok = 1;
+        for (kk = 0; kk < 32; kk = kk + 1)
+            if (model.buf_mem[16'h1A2B + kk] !== (8'h61 + kk[7:0])) icmp_ok = 0;
+        check(icmp_ok, "ICMP payload not echoed byte-for-byte");
+
+        // both checksums, recomputed here rather than trusting the design's
+        chk_sum = 0;
+        for (kk = 0; kk < 20; kk = kk + 2)
+            chk_sum = chk_sum + {model.buf_mem[16'h1A0F + kk], model.buf_mem[16'h1A10 + kk]};
+        chk_sum = (chk_sum & 32'h0000FFFF) + (chk_sum >> 16);
+        chk_sum = (chk_sum & 32'h0000FFFF) + (chk_sum >> 16);
+        check(chk_sum[15:0] == 16'hFFFF, "IP header checksum wrong");
+
+        chk_sum = 0;
+        for (kk = 0; kk < 40; kk = kk + 2)
+            chk_sum = chk_sum + {model.buf_mem[16'h1A23 + kk], model.buf_mem[16'h1A24 + kk]};
+        chk_sum = (chk_sum & 32'h0000FFFF) + (chk_sum >> 16);
+        chk_sum = (chk_sum & 32'h0000FFFF) + (chk_sum >> 16);
+        check(chk_sum[15:0] == 16'hFFFF, "ICMP checksum wrong");
+
+        $display("INFO: scenario 4 (ICMP echo) complete, errors so far = %0d", errors);
+
+        // A broadcast ping must NOT be answered: every node on the segment
+        // would transmit at once.
+        icmp_before = icmp_replies;
+        inject_icmp_echo(16'h0180, dut.next_rdpt, 32'hC0A801FF, 16'h1234, 16'h0002);
+        #400_000;
+        check(icmp_replies == icmp_before, "replied to a broadcast ping");
+
 
         // RXEN must have survived every bank select, TX sequence and
         // cleanup above. It did not before ECON1 moved to BFS/BFC:
@@ -409,7 +531,7 @@ module tb_m4;
               "RXEN was cleared outside an RXRST pulse (bank select clobbered ECON1)");
 
         if (errors == 0)
-            $display("PASS: UDP receive (unicast + broadcast, payload byte-correct, no spurious reply) and UDP send (byte-correct header/checksum/payload, ETXND, TXRTS) all correct, messages counted, RXEN never dropped");
+            $display("PASS: UDP receive (unicast + broadcast, payload byte-correct, no spurious reply) UDP send, and ICMP echo (byte-correct reply, both checksums, broadcast ignored) all correct, messages counted, RXEN never dropped");
         else
             $display("%0d ERROR(S)", errors);
         $finish;
