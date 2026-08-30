@@ -838,7 +838,7 @@ module eth_top #(
     // glance which image is on which board is worth more than it sounds:
     // several wrong conclusions during bring-up came from testing a node that
     // was quietly running an older bitstream.
-    localparam [15:0] BUILD_ID = 16'h000E;
+    localparam [15:0] BUILD_ID = 16'h000F;
 
     localparam integer OCOLS = 21;
 
@@ -900,6 +900,11 @@ module eth_top #(
     reg  [3:0] btn_snap;        // key state latched at the moment of sending
     reg        btn_msg_active;  // the payload port is presenting the button text
     reg        btn_send;        // 1-cycle send request
+    // Counts button updates actually queued for transmission. Without this,
+    // "the peer's display did not change" has at least three possible causes
+    // -- the button never reached the design, the send never fired, or the
+    // frame never arrived -- and no way to tell them apart.
+    reg [15:0] btn_sends;
 
     function [7:0] btn_byte(input [4:0] a);
         case (a)
@@ -927,6 +932,7 @@ module eth_top #(
         if (rst) begin
             btn_msg_active <= 1'b0;
             btn_snap       <= 4'd0;
+            btn_sends      <= 16'd0;
         end else if (msg_updated) begin
             // A typed line takes the payload port back.
             btn_msg_active <= 1'b0;
@@ -937,6 +943,7 @@ module eth_top #(
             btn_snap       <= keys;
             btn_msg_active <= 1'b1;
             btn_send       <= 1'b1;
+            btn_sends      <= btn_sends + 16'd1;
         end
     end
 
@@ -970,7 +977,7 @@ module eth_top #(
         .net_arpreqs(eth_arp_reqs), .net_etype(eth_last_etype),
         .net_resyncs(eth_rx_resyncs),
         .build_id(BUILD_ID), .mac_rb(mac_rb), .mac_d(mac_d),
-        .net_msgs(eth_msgs_rx),
+        .net_msgs(eth_msgs_rx), .net_btnsends(btn_sends),
         .net_polls(eth_polls), .net_pktcnt(eth_pktcnt),
         .net_tsvcount(eth_tsv_count), .net_tsvwire(eth_tsv_wire),
         .net_tsvs2(eth_tsv_s2), .net_tsvs3(eth_tsv_s3),

@@ -73,6 +73,7 @@ module uart_console #(
     input  wire [47:0] mac_rb,       // MAADR1..6, 3rd byte of each read
     input  wire [47:0] mac_d,        // ... 2nd byte, the datasheet dummy slot
     input  wire [15:0] net_msgs,     // UDP messages accepted from the peer
+    input  wire [15:0] net_btnsends, // button updates queued for the peer
     input  wire [15:0] net_polls,    // EPKTCNT polls completed (liveness)
     input  wire [7:0]  net_pktcnt,   // EPKTCNT value the last poll read
     input  wire [15:0] net_tsvcount, // transmit status vector: byte count
@@ -133,7 +134,7 @@ module uart_console #(
     localparam integer OLED_RDY_N = 12;   // "OLED READY\r\n"
     localparam integer OLED_ERR_N = 15;   // "OLED I2C NACK\r\n"
     localparam integer ETH_N      = 11;   // "ETH C1=xx\r\n"
-    localparam integer NET_N      = 69;   // "NET F=... R=... E=.. S=.. A=... T=... X=... P=xxxx K=xx M=xxxx\r\n"
+    localparam integer NET_N      = 76;   // "NET F=... R=... E=.. S=.. A=... T=... X=... P=xxxx K=xx M=xxxx\r\n"
 
     localparam integer TSV_N      = 31;   // TSV n=xxxx w=xxxx s2=xx s3=xx + CRLF
     // "ID HOST=A BLD=xxxx\r\n" -- emitted every ~2.7 s so a tool can identify
@@ -307,7 +308,14 @@ module uart_console #(
             7'd64: net_byte = hexdig(net_msgs[11:8]);
             7'd65: net_byte = hexdig(net_msgs[7:4]);
             7'd66: net_byte = hexdig(net_msgs[3:0]);
-            7'd67: net_byte = 8'h0D;
+            7'd67: net_byte = " ";
+            7'd68: net_byte = "B";
+            7'd69: net_byte = "=";
+            7'd70: net_byte = hexdig(net_btnsends[15:12]);
+            7'd71: net_byte = hexdig(net_btnsends[11:8]);
+            7'd72: net_byte = hexdig(net_btnsends[7:4]);
+            7'd73: net_byte = hexdig(net_btnsends[3:0]);
+            7'd74: net_byte = 8'h0D;
             default: net_byte = 8'h0A;
         endcase
     end
