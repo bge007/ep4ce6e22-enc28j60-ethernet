@@ -227,6 +227,37 @@ Cost: 66% → 83% LE, setup slack 4.27 → 2.32 ns. Most of it is the echo buffe
 read asynchronously and therefore built from logic; only 2% of M9K is in use,
 so a synchronous read would recover most of it if space gets tight.
 
+### Button state across the wire
+
+Pressing a button on one node puts its key state on the other node's OLED, in
+the same notation as the local KEYS console line: `A KEYS 0...` is node A with
+KEY0 held. Both nodes run the same build, so it works in either direction.
+
+Confirmed on hardware three independent ways, which is what made it convincing
+rather than merely plausible. Five presses of KEY0 on Host A:
+
+| | baseline | after | delta |
+|---|---|---|---|
+| Host A `B=` (sends queued) | 24 | 34 | +10 |
+| switch port 13 `InUcastPkts` | 35 | 45 | +10 |
+| switch port 13 `InOctets` | 2,363 | 3,033 | +670 = 10 x 67 |
+| Host B `M=` (messages accepted) | 1 | 11 | +10 |
+
+Ten sends for five presses because press and release are both real state
+changes, and the display should follow both.
+
+**The `B=` counter is the reason this was diagnosable at all.** "The peer's
+display did not change" has three causes -- the button never reached the
+design, the send never fired, or the frame never arrived -- and without a
+counter at the sending end there is no way to tell them apart. Adding one
+turned a guessing exercise into a single measurement. The same move has now
+paid off four times on this project: the transmit status vector, the poll
+counter, the message counter, and this.
+
+A related trap worth recording: the first attempt at this test was inconclusive
+because the presses happened *before* any switch baseline was taken, so "the
+switch shows 35 packets" said nothing. A delta needs both ends.
+
 ### Known open
 
 - **ICMP echo is not implemented**, so `ping` resolves ARP and then times out.
