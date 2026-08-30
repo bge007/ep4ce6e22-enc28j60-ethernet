@@ -212,6 +212,21 @@ The `MAC=` field on the console's `ID` line is the fastest check: it is written
 once at init and re-read on every re-init, so a value that is wrong *and varies
 between reads* is a connection fault, not a firmware one.
 
+### ICMP echo: ping works
+
+`ping 192.168.1.61` now returns replies rather than timing out — 30 of 30, zero
+loss, TTL 64. Host A, still on the previous build, timed out on the same LAN
+during the same test, which is as clean a control as this project has managed.
+
+The payload bound behaves as designed: the 40-byte echo buffer holds an 8-byte
+ICMP header plus a 32-byte payload, so `ping` and `ping -l 32` are answered
+while `ping -l 40` and larger are walked and ignored. A truncated reply would
+be rejected by the sender anyway, so not answering is the honest response.
+
+Cost: 66% → 83% LE, setup slack 4.27 → 2.32 ns. Most of it is the echo buffer,
+read asynchronously and therefore built from logic; only 2% of M9K is in use,
+so a synchronous read would recover most of it if space gets tight.
+
 ### Known open
 
 - **ICMP echo is not implemented**, so `ping` resolves ARP and then times out.

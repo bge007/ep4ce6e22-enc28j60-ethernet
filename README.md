@@ -10,7 +10,7 @@ payload, which is what 1,472-byte datagrams work out to once framing overhead
 is accounted for. See [docs/plan.md](docs/plan.md) for that arithmetic and the
 design rationale.
 
-> ### Status: M1–M4 working on real hardware, M5 not started
+> ### Status: M1–M4 working on real hardware (ping replies now), M5 not started
 >
 > Both nodes have been flashed and tested on real EP4CE6E22 + ENC28J60
 > boards. `EREVID` reads back `0x06` on the LEDs and OLED, the serial console
