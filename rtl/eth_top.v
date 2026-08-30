@@ -137,7 +137,11 @@ module eth_top #(
     // and the buffer it exposes for a received message (RX) -- both wired to
     // uart_console/the OLED writer further down.
     wire [4:0] net_tx_rd_addr;
-    wire [7:0] net_tx_rd_data;
+    wire [7:0] net_tx_rd_data;   // what net_stack reads as the outgoing payload
+    wire [7:0] con_tx_rd_data;   // the console's typed line
+    wire       net_msg_busy;
+    wire       send_req_any;       // typed line or button update
+    wire       force_reinit_req;   // KEY0+KEY3 chord
     wire [4:0] net_rx_rd_addr;
     wire [7:0] net_rx_rd_data;
     wire       net_rx_updated;
@@ -150,7 +154,8 @@ module eth_top #(
         .clk(clk), .rst(rst), .start(eth_ready),
         .cs_n(net_cs_n), .spi_start(net_spi_start), .spi_tx(net_spi_tx),
         .spi_rx(spi_rx), .spi_busy(spi_busy),
-        .tx_rd_addr(net_tx_rd_addr), .tx_rd_data(net_tx_rd_data), .send_req(msg_updated),
+        .tx_rd_addr(net_tx_rd_addr), .tx_rd_data(net_tx_rd_data), .send_req(send_req_any),
+        .msg_busy(net_msg_busy),
         .rx_rd_addr(net_rx_rd_addr), .rx_rd_data(net_rx_rd_data), .rx_updated(net_rx_updated),
         .frames_seen(eth_frames_seen), .arp_replies_sent(eth_arp_replies),
         .last_eir(eth_last_eir), .last_estat(eth_last_estat),
@@ -161,7 +166,7 @@ module eth_top #(
         // KEY3 forces a re-initialisation, so the recovery path can be proven
         // on hardware. Safe to press at any time: the request is taken from
         // the idle poll, never mid-frame, and counts on the console as X=.
-        .force_reinit(key_rise[3]),
+        .force_reinit(force_reinit_req),
         .tsv_count(eth_tsv_count), .tsv_wire(eth_tsv_wire),
         .tsv_stat2(eth_tsv_s2), .tsv_stat3(eth_tsv_s3)
     );
@@ -833,7 +838,7 @@ module eth_top #(
     // glance which image is on which board is worth more than it sounds:
     // several wrong conclusions during bring-up came from testing a node that
     // was quietly running an older bitstream.
-    localparam [15:0] BUILD_ID = 16'h000D;
+    localparam [15:0] BUILD_ID = 16'h000E;
 
     localparam integer OCOLS = 21;
 
@@ -884,6 +889,64 @@ module eth_top #(
 
     wire keys_changed = |key_rise | |key_fall;
 
+    // ---- button state, sent to the peer and shown on its OLED --------------
+    // Generated from a case rather than stored in a buffer: the string is
+    // almost entirely constant, and at 83% of the device a 21-byte array read
+    // asynchronously would cost far more than it is worth.
+    //
+    // The layout deliberately matches the local KEYS console line, so the same
+    // notation means the same thing whether the buttons are under your hand or
+    // on the other board: "A KEYS 0.2." is node A with keys 0 and 2 down.
+    reg  [3:0] btn_snap;        // key state latched at the moment of sending
+    reg        btn_msg_active;  // the payload port is presenting the button text
+    reg        btn_send;        // 1-cycle send request
+
+    function [7:0] btn_byte(input [4:0] a);
+        case (a)
+            5'd0:  btn_byte = 8'd64 + HOST_ID;      // 'A' for host 1, 'B' for 2
+            5'd2:  btn_byte = "K";
+            5'd3:  btn_byte = "E";
+            5'd4:  btn_byte = "Y";
+            5'd5:  btn_byte = "S";
+            5'd7:  btn_byte = btn_snap[0] ? "0" : ".";
+            5'd8:  btn_byte = btn_snap[1] ? "1" : ".";
+            5'd9:  btn_byte = btn_snap[2] ? "2" : ".";
+            5'd10: btn_byte = btn_snap[3] ? "3" : ".";
+            default: btn_byte = " ";
+        endcase
+    endfunction
+
+    // net_stack reads the payload byte by byte during the send, so the source
+    // must not change under it; btn_msg_active only flips between sends.
+    assign net_tx_rd_data = btn_msg_active ? btn_byte(net_tx_rd_addr) : con_tx_rd_data;
+
+    assign send_req_any = msg_updated | btn_send;
+
+    always @(posedge clk) begin
+        btn_send <= 1'b0;
+        if (rst) begin
+            btn_msg_active <= 1'b0;
+            btn_snap       <= 4'd0;
+        end else if (msg_updated) begin
+            // A typed line takes the payload port back.
+            btn_msg_active <= 1'b0;
+        end else if (keys_changed && !net_msg_busy) begin
+            // Dropped rather than queued while a send is in flight: button
+            // state is a level, so the next change sends the current truth
+            // anyway, and a queue would only deliver stale presses late.
+            btn_snap       <= keys;
+            btn_msg_active <= 1'b1;
+            btn_send       <= 1'b1;
+        end
+    end
+
+    // Re-init moved off KEY3 alone, which is now a message button like the
+    // others: holding KEY0 and KEY3 together triggers it instead.
+    reg  chord_d;
+    wire chord = keys[0] & keys[3];
+    always @(posedge clk) chord_d <= chord;
+    assign force_reinit_req = chord & ~chord_d;
+
     wire [4:0] msg_addr;          // driven by the display writer below
     wire [7:0] msg_char;
     // msg_updated is declared near the top of the module -- see the comment there.
@@ -899,7 +962,7 @@ module eth_top #(
         .clk(clk), .rst(rst),
         .keys(keys), .keys_changed(keys_changed),
         .msg_rd_addr(msg_addr), .msg_rd_data(msg_char), .msg_updated(msg_updated),
-        .tx_rd_addr(net_tx_rd_addr), .tx_rd_data(net_tx_rd_data),
+        .tx_rd_addr(net_tx_rd_addr), .tx_rd_data(con_tx_rd_data),
         .oled_ready(o_ready), .oled_nack(oled_i2c_err_sticky),
         .eth_ready(eth_ready), .eth_econ1(econ1_rb),
         .net_frames(eth_frames_seen), .net_replies(eth_arp_replies),

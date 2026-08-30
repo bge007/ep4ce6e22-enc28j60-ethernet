@@ -58,6 +58,12 @@ module net_stack #(
     output reg  [4:0]  tx_rd_addr,
     input  wire [7:0]  tx_rd_data,
     input  wire        send_req,
+    // High from the moment a send is queued until the frame has been written.
+    // The payload is read from tx_rd_data *during* the send, so whoever drives
+    // that port has to know not to change what it is presenting half way
+    // through -- otherwise a button update arriving mid-transmission corrupts
+    // the message already going out.
+    output wire        msg_busy,
 
     // M4 RX: the last UDP message received from the peer, read through a
     // dedicated port the same way -- eth_top's OLED writer addresses this
@@ -394,6 +400,10 @@ module net_stack #(
     reg [7:0]  rcr_rb;              // generic RCR's captured byte
     reg [26:0] wait_cnt;
     reg        send_pending;    // M4: a typed line is waiting to go out
+    // S_MSGBANK (38) through S_MSGTXST1 (59) is the message transmit chain.
+    // A couple of ARP-path states share that range; counting them as busy is
+    // conservative in the harmless direction.
+    assign msg_busy = send_pending || (state >= 7'd38 && state <= 7'd59);
     reg [15:0] tsv_addr;        // first byte of the status vector = ETXND + 1
     reg [2:0]  tsv_idx;
 

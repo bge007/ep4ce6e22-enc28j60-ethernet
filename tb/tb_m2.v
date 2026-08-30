@@ -141,8 +141,12 @@ module tb_m2;
     pullup(oled_scl);
     pullup(oled_sda);
 
+    // Declared before the DUT: a port connection to an undeclared name
+    // would otherwise create a 1-bit implicit net.
+    reg [3:0] key_drv = 4'b1111;   // active low, so all-ones is nothing pressed
+
     eth_top #(.HOST_ID(8'd1)) dut (
-        .clk(clk), .nrst(nrst), .key(4'b1111), .led(led),
+        .clk(clk), .nrst(nrst), .key(key_drv), .led(led),
         .enc_rst_n(enc_rst_n), .enc_cs_n(enc_cs_n), .enc_sck(enc_sck),
         .enc_mosi(enc_mosi), .enc_miso(enc_miso), .enc_int(1'b0),
         .oled_scl(oled_scl), .oled_sda(oled_sda),
@@ -261,6 +265,32 @@ module tb_m2;
 
         // ---- M1 behaviour must still work: EREVID readback unaffected ----
         check(dut.erevid === 8'h06, "M1 EREVID readback broken by M2 changes");
+
+        // ---- a button press queues a message to the peer -------------------
+        // The send path itself is proven in tb_m4; what is new here is the
+        // trigger, the snapshot of key state, and the payload port switching
+        // from the console's typed line to the generated button text. The
+        // snapshot matters: net_stack reads the payload byte by byte during
+        // the send, so a key released mid-transmission must not change what is
+        // already going out.
+        key_drv = 4'b1110;              // KEY0 down (active low)
+        #12_000_000;                    // past the 10 ms debounce
+        check(dut.keys === 4'b0001, "debounced key state wrong");
+        check(dut.btn_msg_active === 1'b1, "button press did not claim the payload port");
+        check(dut.btn_snap === 4'b0001, "button snapshot wrong");
+        // Read the generator directly: net_tx_rd_addr is driven by net_stack
+        // and is not parked at 0 between sends, so observing net_tx_rd_data
+        // would only say which byte happened to be selected.
+        check(dut.btn_byte(5'd0)  === "A", "byte 0 is not the host letter");
+        check(dut.btn_byte(5'd2)  === "K" && dut.btn_byte(5'd5) === "S",
+              "the KEYS label is wrong");
+        check(dut.btn_byte(5'd7)  === "0", "KEY0 down should render as '0'");
+        check(dut.btn_byte(5'd8)  === ".", "KEY1 up should render as '.'");
+        check(dut.btn_byte(5'd10) === ".", "KEY3 up should render as '.'");
+
+        key_drv = 4'b1111;              // released
+        #12_000_000;
+        check(dut.btn_snap === 4'b0000, "release did not update the snapshot");
 
         if (errors == 0)
             $display("PASS: M2 link/MAC init -- RX/TX buffer, filter, MAC config, MAC address + verified readback, RXEN, UART report all correct");
