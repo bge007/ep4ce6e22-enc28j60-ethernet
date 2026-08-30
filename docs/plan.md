@@ -125,292 +125,156 @@ Total ~2,500 LE of 6,272 — comfortable margin, no external RAM.
 | M1 | SPI alive — project, pinout, `spi_master`, EREVID readback | `0x06` on the LEDs | **Confirmed on both nodes** |
 | M2 | Link up — full init FSM, MAC config, RXEN | Link established | RXEN confirmed on hardware (`ECON1` readback); link LED not yet visually checked |
 | M3 | Ping — RX/TX engines, ARP responder (ICMP echo deferred to M4) | Sustained ping, 0% loss | **ARP answering on hardware**; not yet *sustained* — see the stability section below |
-| M4 | UDP echo — parsing, checksums, echo path | 10k datagrams echoed correctly | **Board-to-board messaging works on hardware**: a line typed on Host A's console increments Host B's message counter. Needed the CS-hold-time fix (fault 5 in [enc28j60.md](enc28j60.md)); volume/soak testing still to do |
+| M4 | UDP echo — parsing, checksums, echo path | 10k datagrams echoed correctly | **Works on hardware, bidirectionally.** Volume testing folds into M5 |
 | M5 | Max speed — UDP blaster, measurement scripts, full duplex | >= 9.3 Mbit/s, loss-free | Not started |
 
 Each milestone is a self-contained chunk; M3 is the largest.
 
 
-## Stability: where M3 actually stands
+## Current status (2026-08-30)
 
-M3's *functional* exit criterion is met — the ARP responder answers, `ping`
-moves from "Destination host unreachable" to "Request timed out", the switch
-learns both MACs, and the port's `InUcastPkts` climbs. The *sustained* half is
-not met: a node runs correctly for a few minutes and then stops receiving.
+**M1–M4 all work on real hardware.** The headline demo runs: a line typed on
+one node's serial console appears on the other's OLED, in both directions, with
+each message counted only by its receiver.
 
-Four separate hardware-only faults have been found and fixed, none of which
-simulation would have surfaced on its own. They are written up in full in
-[enc28j60.md](enc28j60.md); in brief:
-
-| # | Fault | Signature | Status |
-|---|---|---|---|
-| 1 | Every TX frame had a bad CRC | TSV `s2=0x90`; switch `InOctets` up, `InUcastPkts` 0 | Fixed — per-packet control byte `0x07` |
-| 2 | Bank selects cleared `ECON1.RXEN` | Ran a while, then received nothing | Fixed — all `ECON1` access via `BFS`/`BFC` |
-| 3 | Two-byte SPI helpers hung when data equalled the opcode | FSM frozen, `P=` static, `K=01` | Fixed — explicit phase bit |
-| 4 | Reflashing the FPGA does not reset the ENC28J60 | `A=0000`, `T=0000` from frame 1 | Fixed — errata-19 reset sequence |
-
-Fault 3 is worth singling out: `WCR(ERDPTL)` is `0x40` and `WCR(ERXRDPTL)` is
-`0x4C`, and both are written with the low byte of an RX ring pointer that walks
-all 256 values. Two chances in 256 per frame predicts a mean of 128 frames to
-failure; the observed wedges were at **122, 156 and 134 frames**.
-
-Each fix carries a regression test that was verified to *fail* against the
-pre-fix RTL rather than pass vacuously.
-
-### Measured results after the fixes
-
-| Run | Frames | Resyncs (`X`) | Outcome |
-|---|---|---|---|
-| Host A, 25 ping rounds | — | — | 0/25 degraded (was 25/25) |
-| Host B, 15 min | 365 | 0 → 21 late | Ran ~11 min, then chain corruption |
-| Host A, 15 min | 275 → 904 | 0 → 414 | Clean ~8.5 min, then resync storm |
-| Host A, current | 602 | **0** | Healthy, counters advancing |
-
-### Update: the remaining fault, and what replaced the resync
-
-**Implemented.** The `RXRST` resync is gone. When the packet chain is found
-corrupt, `net_stack` now raises `reinit_req` and parks itself; `eth_top` drops
-`eth_ready`, which hands the SPI bus back through the existing mux, and re-runs
-the *entire* bring-up — hardware reset line, `ECON2.PWRSV` clear, system reset,
-`ESTAT.CLKRDY` confirmation, then the full M2 configuration — before handing
-the bus back. `net_stack`'s existing `!start` guard parks it in `S_INIT0`
-meanwhile, so no new handshake signal was needed.
-
-`tb_m3` scenario 4 injects a next-packet pointer beyond `ERXND`, stands in for
-`eth_top` by dropping and re-raising `start`, and checks the node serves ARP
-again afterwards. Verified to time out against RTL with the request disabled.
-
-**Soak result (25 minutes, Host B):**
-
-| metric | value |
-|---|---|
-| frames processed | **7,863** |
-| ARP requests parsed | 1,492 |
-| ARP replies sent | 53 |
-| chain corruptions (`X`) | **0** |
-| longest stall | 1 s |
-| FSM alive at end | yes |
-
-Against previous runs that died at 122–365 frames, that is roughly a
-twenty-fold improvement with no failure at all. The switch agrees: port
-counters read 54 unicast in / 3,456 octets — exactly 64 bytes per reply,
-matching the console's count, with every error counter at zero.
-
-**Caveat worth keeping.** `X` stayed at 0 for the whole soak, so the chain
-never corrupted and **the new recovery path was never exercised on hardware**.
-It is proven in simulation only. Whether the corruption is genuinely gone or
-merely rarer is not yet established — the honest reading is that this soak
-shows the *fault* did not recur, not that the *recovery* works on real silicon.
-
-### The original fault, as first diagnosed
-
-After a period of correct operation the RX packet-chain pointer goes out of
-range. The driver detects this (`next_ptr_ok`) and pulses `ECON1.RXRST` to
-resync — but **the resync does not restore reception**. `X` climbs into the
-hundreds, the part stops delivering packets (`EPKTCNT` reads 0 forever) and the
-node never recovers, while the FSM itself stays alive and polling.
-
-Two facts constrain the cause:
-
-- It is not the FSM. The poll counter keeps advancing throughout, so the driver
-  is healthy and the *part* has stopped handing over frames.
-- It is not purely the module. A faulty ENC28J60 was found and replaced early
-  on, which removed one source of chain corruption but not this failure.
-
-**Planned fix.** Stop trying to patch the pointers. `RXRST` resets the receive
-logic but leaves the driver guessing where the part's write pointer ended up,
-and that guess is what fails. Now that a *verified* full reset exists — the
-errata-19 sequence, which demonstrably brings a part back from an unknown
-state — the recovery path should re-run that entire sequence plus the M2
-configuration, rather than the partial `RXRST` patch-up.
-
-This needs `net_stack` to hand the SPI bus back to the M1/M2 FSM on demand and
-take it again when configuration completes, which is a real change to how the
-two share the bus rather than a local edit.
-
-### The MAC readback doubles as an SPI wiring check
-
-After Host B's jumpers were disturbed and reconnected, it ran but behaved
-badly: 633 re-initialisations in eight minutes against Host A's zero, on the
-same bitstream. The console's `MAC=` field identified it immediately:
-
-```
-Host B   MAC=020000000000  then  MAC=000000000000     <- differs every re-init
-Host A   MAC=0242CE600001                             <- stable, correct
-```
-
-`MAADR` is written once at init and read back on every re-init, so it is a
-free, continuously-repeated integrity check on the SPI read path. A value that
-is wrong *and changes between reads* is not a firmware bug — the same image was
-correct on the other node — it is a marginal connection. Reseating the jumpers
-took Host B to a stable `0242CE600002` and zero re-inits:
-
-| | frames | arp | replies | re-inits |
-|---|---|---|---|---|
-| Host A | 437 | 239 | 11 | **0** |
-| Host B (before) | 2,421 | 194 | 14 | **633** |
-| Host B (after) | 435 | 239 | 11 | **0** |
-
-The switch counters were clean throughout — one FCS error per port, ever — so
-the Ethernet side was never the problem, and looking there would have wasted
-the time that the MAC readback saved.
-
-### Operational notes learned the hard way
-
-- **A JTAG reflash is not a power cycle.** The FPGA restarts; the ENC28J60 does
-  not. Fix 4 makes the driver recover from this, but a genuinely wedged module
-  has still needed a power cycle. Measurements taken right after a reflash
-  misled this project more than once.
-- **Check the build identifier.** The OLED shows `BLD xxxx` (line 2) precisely
-  because there is one USB-Blaster between two boards, and they routinely sit
-  one flash apart. Several wrong conclusions came from testing a node quietly
-  running an older bitstream.
-- **The console only speaks when a counter changes** — so a wedged node and an
-  idle one look identical. Hence the heartbeat and the `P=`/`K=` fields; that
-  instrumentation is what made fault 3 findable at all.
-
-### Identifying a board without resetting it
-
-The two boards are indistinguishable to JTAG -- openFPGALoader reports the same
-EP4CE6 IDCODE for either -- so nothing in the programming path can tell them
-apart, and flashing Host A's bitstream onto Host B silently gives it Host A's
-IP and MAC. That mistake was made more than once.
-
-The console cable can answer what the JTAG cable cannot. The design now emits
-
-```
-ID HOST=A BLD=0003
-```
-
-every ~2.7 s. Listening for it beats the alternatives: reading the power-on
-banner needs a reset, which throws away the state under investigation, and a
-query byte would collide with the typed-message feature sharing that port.
-
-`build.ps1 -Auto` reads that line, picks the revision itself, and -- after
-programming -- reads it back to confirm the board now reports the build just
-written. `-Port COMx` narrows the scan when both consoles are attached; with
-two boards answering the script refuses to guess rather than pick one, since
-JTAG cannot say which the blaster is on.
-
-Verified on hardware with both boards attached: the scan lists
-`COM5=HostA, COM6=HostB` and refuses to proceed, and `-Port COM6` then targets
-Host B and confirms `Verify: Host B running build 0003.`
-
-### Both nodes on build 0003
-
-| | Host A | Host B |
+| | milestone | state |
 |---|---|---|
-| frames (15 min) | 612 | 457 |
-| ARP requests parsed | 601 | 448 |
-| replies sent | 26 | 25 |
-| chain corruptions | **0** | **0** |
-| longest stall | 11 s | 11 s |
-| reachable after | yes | yes |
+| M1 | SPI alive, `EREVID` readback | hardware ✓ both nodes |
+| M2 | Link up, MAC config, `RXEN` | hardware ✓, MAC address now verified by readback |
+| M3 | ARP responder | hardware ✓ — `ping` goes "unreachable" → "timed out" |
+| M4 | UDP message display | hardware ✓ — bidirectional, board to board |
+| M5 | Throughput | **not started** — this is the next phase |
 
-The switch learns both on their documented ports -- `0242.ce60.0001` on
-Gi1/0/13 and `0242.ce60.0002` on Gi1/0/17 -- with every error counter at zero.
-M3 is now stable on both nodes, which unblocks board-to-board M4.
+Best measured run, both nodes on build `000C`, 8 minutes:
 
-### Both nodes on build 000A, with the MAC config actually live
+| node | frames | ARP parsed | replies | re-inits | longest gap |
+|---|---|---|---|---|---|
+| Host A | 437 | 239 | 11 | 0 | 4.0 s |
+| Host B | 435 | 239 | 11 | 0 | 4.4 s |
 
-The CS-hold fix means `MACON3`, `MABBIPG`, `MAIPGL/H` and `MAMXFL` take effect
-for the first time — until now the part ran on reset defaults — so this soak
-also re-qualifies the MAC configuration itself.
+Resource use is now the thing to watch going into M5: **4,126 / 6,272 LE (66%)**,
+1,628 registers, 4,472 memory bits. M5 adds a payload generator and a
+loss-counting receiver, so the remaining third of the device is the budget.
 
-| | Host A | Host B |
+### The five faults that had to be fixed first
+
+All were invisible in simulation and are written up in full, with the
+diagnostic that found each, in [enc28j60.md](enc28j60.md). Summarised only so
+the shape of the problem is visible from here:
+
+| # | fault | signature |
 |---|---|---|
-| frames (15 min) | 1,009 | 1,316 |
-| ARP requests parsed | 408 | 651 |
-| replies sent | 27 | 28 |
-| chain corruptions | **0** | **0** |
-| longest stall | 5 s | 4 s |
-| reachable after | yes | yes |
+| 1 | Every transmitted frame had a bad CRC | switch counted octets, zero packets, zero errors |
+| 2 | `ECON1` bank selects cleared `RXEN` | ran a while, then received nothing |
+| 3 | Two-byte SPI helpers hung when data equalled the opcode | froze after ~128 frames (2-in-256 per frame) |
+| 4 | A JTAG reflash does not reset the ENC28J60 | `A=0000` from the first frame |
+| 5 | `TCSH` is 210 ns for MAC/MII, not the 10 ns for ETH | every MAC register write silently failed to commit |
 
-Messaging is bidirectional and each message increments only the receiver's
-counter:
+Fault 5 is the one worth internalising: it had been corrupting the MAC setup
+since M2 and explains three symptoms that looked unrelated — no unicast
+reception, bad transmit CRCs, and MAC-register readback returning nonsense.
 
-| | Host A `M=` | Host B `M=` |
-|---|---|---|
-| baseline | 0 | 3 |
-| A → B | 0 | 4 |
-| B → A | 1 | 4 |
-| A → B | 1 | 5 |
-| A → B, after the 15-minute soak | 1 | 6 |
+Each fix carries a regression test verified to **fail** against the pre-fix RTL
+rather than pass vacuously, which is the only way to know a test is doing
+anything. Six testbenches pass.
 
-### Proving the recovery path on hardware
+### Recovery, and what it is for
 
-The full re-init recovery has never fired on real silicon: `X` has stayed at 0
-through every soak since the CS-hold and SPI-phase faults were fixed. That is
-the outcome we wanted, but it leaves a recovery path that has only ever run in
-a testbench — which is not a recovery path anyone should rely on.
+A corrupt receive chain, a stalled receiver, or a deliberate `KEY3` press all
+route into the same recovery: hand the SPI bus back, re-run the entire
+bring-up — hardware reset, errata-19 reset sequence, `ESTAT.CLKRDY`
+confirmation, full M2 configuration — then hand back. All three routes have run
+on real silicon, not just in simulation:
 
-**KEY3 now forces one.** The request is latched wherever it arrives and acted
-on from the idle poll, so it can never interrupt a frame mid-flight, and it
-counts on the console as `X=` alongside genuine corruption. Pressing it at any
-time is safe by design; if it is not, that is exactly what the test is for.
+- **chain corruption** — Host A absorbed 542 of them while continuing to serve ARP
+- **`KEY3`** — manual trigger, for exercising the path on demand
+- **stall watchdog** — proven by shutting the node's switch port for 60 s
+  (`pc/blackout-test.ps1`), which fired two re-inits and recovered cleanly
 
-`tb_m3` scenario 5 exercises the same trigger in simulation and checks the node
-serves ARP again afterwards.
+### The dominant risk right now: the wiring
 
-### The recovery fired on hardware -- and exposed a second stall it was blind to
+**Host A is down as of this writing** — `MAC=000000000000`, unreachable, while
+its switch port still shows `connected`. Link up with SPI dead means the module
+has power and its PHY is running, but the SPI path is not responding.
 
-Pressing KEY3 proved the path works on real silicon. Host A subsequently
-performed **542** re-initialisations and kept serving ARP throughout, frames and
-ARP counters advancing the whole time. The recovery works.
+This is the second such failure in a day. Host B had the same class of fault
+after its jumpers were disturbed: 633 re-inits in eight minutes against Host A's
+zero, on identical firmware, with the MAC reading back differently on every
+re-init. Reseating fixed it completely.
 
-It also revealed a failure it could not see. Host B wedged with:
+Both nodes are wired with F-F DuPont jumpers, and that is now the least
+reliable part of the system by a wide margin. **Before any M5 throughput
+measurement is worth recording, the wiring has to be made solid** — soldered
+leads, or at minimum shorter jumpers with strain relief. A throughput figure
+taken over a marginal SPI link measures the jumper, not the design.
 
-```
-F=0A73  A=068D  X=0021  frozen        <- frames, ARP and re-inits all stopped
-P=4D51 -> 5BF2  advancing             <- the state machine is perfectly healthy
-```
+The `MAC=` field on the console's `ID` line is the fastest check: it is written
+once at init and re-read on every re-init, so a value that is wrong *and varies
+between reads* is a connection fault, not a firmware one.
 
-The chain-corruption check only runs from cleanup, and cleanup is reached by
-*processing a frame*. When the part simply stops handing frames over, EPKTCNT
-reads 0 for ever, no frame is processed, cleanup never runs, and nothing asks
-for recovery. The node cannot detect its own silence.
+### Known open
 
-**Fix: silence is now its own trigger.** A watchdog requests a re-init after
-~30 s without a single frame. This LAN delivers broadcast traffic every second
-or so, so a node that quiet has stopped receiving rather than found a quiet
-network; a needless re-init costs about 15 ms, so erring towards firing is
-cheap. `IDLE_LIMIT` is a parameter purely so `tb_m3` can shorten it — scenario 6
-stalls the model and checks recovery, verified to fail with the watchdog
-disabled.
+- **ICMP echo is not implemented**, so `ping` resolves ARP and then times out.
+  That is the defined M3 exit criterion, not a defect, but it does mean `ping`
+  cannot be used as a liveness check for M5.
+- The receive-chain corruption still happens occasionally in bursts. The
+  recovery absorbs it invisibly; the underlying cause has not been isolated,
+  and it may well be the same wiring marginality.
 
-### The watchdog, proven on hardware
+## M5: throughput
 
-Creating 30 s of genuine silence on a live LAN is awkward: broadcast traffic
-arrives every second or so. `pc/blackout-test.ps1` does it by shutting the
-node's switch port over SSH, so nothing has to be unplugged, and it always
-restores the port in a `finally` block.
+The goal is **≥ 9.3 Mbit/s of UDP payload, loss-free**, against the derived
+ceiling of ~9.57 Mbit/s (1,472 B payload inside 1,538 B of wire occupancy,
+~813 packets/s). The budget section above has the arithmetic.
 
-```
-baseline          : F=113  A=80  X=9
-  >>> port shut
-during blackout   : F=113  A=80  X=11     frames frozen, X rose by 2
-  >>> port restored
-after restore     : F=119  A=85  X=12     frames resumed
-```
+### What has to be built
 
-Two re-initialisations across a 60-second blackout is exactly the ~30 s period,
-and the node resumed receiving as soon as the link came back. Between this, the
-KEY3 trigger and the 542 re-inits Host A performed against genuine chain
-corruption, all three paths into the recovery are now exercised on real
-silicon rather than only in simulation.
+1. **A parameterised frame writer.** The transmit path currently emits
+   fixed-size frames — a 60-byte ARP reply, a 63-byte message. M5 needs
+   arbitrary lengths up to 1,514 bytes, which means the `txpos` counters and
+   the length arithmetic stop fitting in the current 6-bit registers. That
+   width assumption is exactly the kind that failed silently before (`m2_idx`
+   was 5 bits for a 6-bit table), so size these from the actual maximum.
+2. **A payload generator.** Counting patterns, not stored data — 1,472 bytes of
+   buffer per frame is affordable but pointless when the receiver can verify a
+   sequence arithmetically.
+3. **A sequence number and a loss counter.** Put a 32-bit sequence in the
+   payload; the receiver counts received, out-of-order and missing. Loss has to
+   be measured at the receiver, because the switch counts frames that arrive,
+   not frames that were meant to.
+4. **A rate control.** Back-to-back transmission at the SPI level will not
+   reach line rate on its own; the interesting number is what it *does* reach,
+   so make the inter-frame gap adjustable and sweep it.
 
-## Next steps, in order
+### How it gets measured
 
-1. Re-run the full ENC28J60 init (errata-19 reset + M2 config) as the recovery
-   path for a corrupt packet chain, replacing the `RXRST` resync.
-2. Re-soak both nodes; the target is a clean run well past 1000 frames with
-   `X` staying at 0.
-3. Only then, board-to-board M4: type on Host A's console, see it on Host B's
-   OLED. Both nodes must be on the same build first.
-4. Merge `m4-udp-messaging` into `main`.
-5. Optional once stable: ICMP echo, so `ping` succeeds outright rather than
-   resolving ARP and timing out.
+Three independent instruments, which is what made the earlier debugging
+tractable:
 
+- **the receiver's own counters** — packets, bytes, sequence gaps, over the console
+- **the switch port counters** — `InUcastPkts` and `InOctets` on Gi1/0/13 and
+  Gi1/0/17, an authoritative count that owes nothing to our RTL
+- **elapsed time** from the console, so throughput is derived from the node's
+  own clock rather than the PC's scheduling
+
+A run only counts if the receiver's packet count and the switch's agree.
+
+### Order of work
+
+1. **Fix the wiring first.** Nothing measured before this is worth recording.
+2. Long soak — 30–60 minutes, both nodes, target zero re-inits. Every previous
+   long soak was measuring a node with a wiring fault.
+3. Widen the transmit path to arbitrary frame lengths; extend `tb_m4` to send
+   and check a maximum-size frame.
+4. Add the sequence number, the loss counter and the rate control, with a
+   testbench that injects a deliberate gap and checks it is counted.
+5. Measure: sweep the inter-frame gap, record throughput against loss, and
+   confirm the switch agrees with the receiver at each point.
+6. Only if the number falls short: revisit duplex. Both nodes currently
+   negotiate 10 Mbit **half** duplex through the switch. Full duplex needs
+   `PHCON1.PDPXMD` and `MACON3.FULDPX` on both nodes, and — per the duplex
+   section above — setting it on one side only causes a duplex mismatch that
+   collapses under load. Both or neither.
 
 ## Verification approach
 
