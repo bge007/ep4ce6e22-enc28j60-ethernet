@@ -246,6 +246,10 @@ rather than merely plausible. Five presses of KEY0 on Host A:
 Ten sends for five presses because press and release are both real state
 changes, and the display should follow both.
 
+The reverse direction measures the same, with both nodes on build `000F`: five
+presses of KEY0 on Host B gave `B=10` at the sender and took Host A's `M` from
+1 to 11. Ten sent, ten accepted, in both directions.
+
 **The `B=` counter is the reason this was diagnosable at all.** "The peer's
 display did not change" has three causes -- the button never reached the
 design, the send never fired, or the frame never arrived -- and without a
